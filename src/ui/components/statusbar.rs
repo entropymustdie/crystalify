@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::ui::theme::{ACCENT_CYAN, SPOTIFY_GREEN, TEXT_GRAY, TEXT_WHITE};
+use crate::ui::theme::{MUTED, PRIMARY, TEXT};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -8,26 +8,26 @@ use ratatui::Frame;
 
 pub fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let header_text = vec![Line::from(vec![
-        Span::styled(" Device: ", Style::default().fg(TEXT_GRAY)),
+        Span::styled(" Device: ", Style::default().fg(MUTED)),
         Span::styled(
             &state.device_name,
-            Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  |  User: ", Style::default().fg(TEXT_GRAY)),
+        Span::styled("  |  User: ", Style::default().fg(MUTED)),
         Span::styled(
             &state.username,
             Style::default()
-                .fg(TEXT_WHITE)
+                .fg(TEXT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  |  Audio Backend: ", Style::default().fg(TEXT_GRAY)),
-        Span::styled("PipeWire (ALSA)", Style::default().fg(SPOTIFY_GREEN)),
+        Span::styled("  |  Audio Backend: ", Style::default().fg(MUTED)),
+        Span::styled("PipeWire (ALSA)", Style::default().fg(PRIMARY)),
     ])];
 
     let widget = Paragraph::new(header_text).block(
         Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(TEXT_GRAY)),
+            .border_style(Style::default().fg(MUTED)),
     );
     frame.render_widget(widget, area);
 }
@@ -35,33 +35,61 @@ pub fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
 pub fn render_footer(frame: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
         Span::styled(
-            " [Space] ",
+            " [/] ",
             Style::default()
-                .fg(SPOTIFY_GREEN)
+                .fg(PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Play/Pause   ", Style::default().fg(TEXT_WHITE)),
+        Span::styled("Search  ", Style::default().fg(TEXT)),
         Span::styled(
-            " [Left/Right] ",
+            "[Tab/1-4] ",
             Style::default()
-                .fg(SPOTIFY_GREEN)
+                .fg(PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Seek +/-5s   ", Style::default().fg(TEXT_WHITE)),
+        Span::styled("Tabs  ", Style::default().fg(TEXT)),
         Span::styled(
-            " [+/- or Up/Down] ",
+            "[Up/Down] ",
             Style::default()
-                .fg(SPOTIFY_GREEN)
+                .fg(PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Volume   ", Style::default().fg(TEXT_WHITE)),
+        Span::styled("Select  ", Style::default().fg(TEXT)),
         Span::styled(
-            " [Q/Esc] ",
+            "[Enter] ",
             Style::default()
-                .fg(SPOTIFY_GREEN)
+                .fg(PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Quit", Style::default().fg(TEXT_WHITE)),
+        Span::styled("Play/Open  ", Style::default().fg(TEXT)),
+        Span::styled(
+            "[p] ",
+            Style::default()
+                .fg(PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Play All  ", Style::default().fg(TEXT)),
+        Span::styled(
+            "[n/b] ",
+            Style::default()
+                .fg(PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Next/Prev  ", Style::default().fg(TEXT)),
+        Span::styled(
+            "[Space] ",
+            Style::default()
+                .fg(PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Pause  ", Style::default().fg(TEXT)),
+        Span::styled(
+            "[q] ",
+            Style::default()
+                .fg(PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Quit", Style::default().fg(TEXT)),
     ])];
 
     let widget = Paragraph::new(footer_text)
@@ -69,7 +97,7 @@ pub fn render_footer(frame: &mut Frame, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(TEXT_GRAY)),
+                .border_style(Style::default().fg(MUTED)),
         );
     frame.render_widget(widget, area);
 }

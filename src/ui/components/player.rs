@@ -1,7 +1,7 @@
 use crate::app::AppState;
-use crate::ui::theme::{ACCENT_CYAN, ACCENT_YELLOW, SPOTIFY_GREEN, TEXT_GRAY, TEXT_WHITE};
+use crate::ui::theme::{BADGE_FG, MUTED, PRIMARY, TEXT};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph};
 use ratatui::Frame;
@@ -11,16 +11,16 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled(
             " [PLAYING] ",
             Style::default()
-                .bg(SPOTIFY_GREEN)
-                .fg(Color::Black)
+                .bg(PRIMARY)
+                .fg(BADGE_FG)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
             " [PAUSED] ",
             Style::default()
-                .bg(ACCENT_YELLOW)
-                .fg(Color::Black)
+                .bg(MUTED)
+                .fg(BADGE_FG)
                 .add_modifier(Modifier::BOLD),
         )
     };
@@ -29,19 +29,19 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         Line::from(vec![status_badge]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Title:  ", Style::default().fg(TEXT_GRAY)),
+            Span::styled("Title:  ", Style::default().fg(MUTED)),
             Span::styled(
                 &state.track_title,
-                Style::default().fg(TEXT_WHITE).add_modifier(Modifier::BOLD),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Artist: ", Style::default().fg(TEXT_GRAY)),
-            Span::styled(&state.track_artist, Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Artist: ", Style::default().fg(MUTED)),
+            Span::styled(&state.track_artist, Style::default().fg(PRIMARY)),
         ]),
         Line::from(vec![
-            Span::styled("Album:  ", Style::default().fg(TEXT_GRAY)),
-            Span::styled(&state.track_album, Style::default().fg(Color::Gray)),
+            Span::styled("Album:  ", Style::default().fg(MUTED)),
+            Span::styled(&state.track_album, Style::default().fg(TEXT)),
         ]),
     ];
 
@@ -49,7 +49,9 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(" Now Playing "),
+            .border_style(Style::default().fg(MUTED))
+            .title(" Now Playing ")
+            .title_style(Style::default().fg(TEXT)),
     );
     frame.render_widget(widget, area);
 }
@@ -76,36 +78,45 @@ pub fn render_progress(frame: &mut Frame, state: &AppState, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(" Progress "),
+                .border_style(Style::default().fg(MUTED))
+                .title(" Progress ")
+                .title_style(Style::default().fg(TEXT)),
         )
-        .gauge_style(Style::default().fg(SPOTIFY_GREEN).bg(TEXT_GRAY))
+        .gauge_style(Style::default().fg(PRIMARY).bg(MUTED))
         .ratio(ratio)
-        .label(label);
+        .label(Span::styled(
+            label,
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ));
     frame.render_widget(widget, area);
 }
 
 pub fn render_details(frame: &mut Frame, state: &AppState, area: Rect) {
     let vol_percent = ((state.volume as f64 / u16::MAX as f64) * 100.0).round() as u8;
+    let queue_info = if state.queue.is_empty() {
+        "Empty".to_string()
+    } else {
+        format!("{} / {} tracks", state.queue_index + 1, state.queue.len())
+    };
     let text = vec![
         Line::from(vec![
-            Span::styled("Audio Pipeline: ", Style::default().fg(TEXT_GRAY)),
-            Span::styled("librespot -> PipeWire", Style::default().fg(TEXT_WHITE)),
+            Span::styled("Audio Pipeline: ", Style::default().fg(MUTED)),
+            Span::styled("librespot -> PipeWire", Style::default().fg(TEXT)),
         ]),
         Line::from(vec![
-            Span::styled("Format:         ", Style::default().fg(TEXT_GRAY)),
-            Span::styled("44.1 kHz / 16-bit", Style::default().fg(TEXT_WHITE)),
+            Span::styled("Bitrate:        ", Style::default().fg(MUTED)),
+            Span::styled("320 kbps (Vorbis)", Style::default().fg(TEXT)),
         ]),
         Line::from(vec![
-            Span::styled("Bitrate:        ", Style::default().fg(TEXT_GRAY)),
-            Span::styled("320 kbps (Vorbis)", Style::default().fg(TEXT_WHITE)),
+            Span::styled("Queue:          ", Style::default().fg(MUTED)),
+            Span::styled(queue_info, Style::default().fg(TEXT)),
         ]),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("Volume: ", Style::default().fg(TEXT_GRAY)),
+            Span::styled("Volume:         ", Style::default().fg(MUTED)),
             Span::styled(
-                format!("{}%", vol_percent),
+                format!("{}%  ([-]/[+])", vol_percent),
                 Style::default()
-                    .fg(ACCENT_YELLOW)
+                    .fg(PRIMARY)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -115,7 +126,9 @@ pub fn render_details(frame: &mut Frame, state: &AppState, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(" Playback Details "),
+            .border_style(Style::default().fg(MUTED))
+            .title(" Playback Details ")
+            .title_style(Style::default().fg(TEXT)),
     );
     frame.render_widget(widget, area);
 }

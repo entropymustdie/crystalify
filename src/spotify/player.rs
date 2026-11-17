@@ -26,8 +26,10 @@ impl SpotifyPlayer {
         mixer.set_volume(initial_volume);
         let volume_getter = mixer.get_soft_volume();
 
-        let mut player_config = PlayerConfig::default();
-        player_config.position_update_interval = Some(Duration::from_millis(250));
+        let player_config = PlayerConfig {
+            position_update_interval: Some(Duration::from_millis(250)),
+            ..Default::default()
+        };
 
         let player = Player::new(
             player_config,
@@ -57,6 +59,7 @@ impl SpotifyPlayer {
             .join(", ");
 
         Ok(TrackMetadata {
+            uri: uri.to_uri(),
             title: track.name,
             artist,
             album: track.album.name,

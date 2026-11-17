@@ -20,3 +20,15 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# AI agent configuration (local only)
+.agents/
+.agent/
+_agents/
+_agent/
+AGENTS.md
+GEMINI.md
+
+# Local notes
+LEARNING_PATH.md
+
