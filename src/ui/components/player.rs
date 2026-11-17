@@ -1,10 +1,11 @@
-use crate::app::AppState;
+use crate::app::{AppState, COVER_HEIGHT_CELLS, COVER_WIDTH_CELLS};
 use crate::ui::theme::{BADGE_FG, MUTED, PRIMARY, TEXT};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph};
 use ratatui::Frame;
+use ratatui_image::Image;
 
 pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
     let status_badge = if state.is_playing {
@@ -45,15 +46,46 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         ]),
     ];
 
-    let widget = Paragraph::new(card_text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(MUTED))
-            .title(" Now Playing ")
-            .title_style(Style::default().fg(TEXT)),
-    );
-    frame.render_widget(widget, area);
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(MUTED))
+        .title(" Now Playing ")
+        .title_style(Style::default().fg(TEXT));
+
+    let inner_area = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
+    }
+
+    let can_fit_cover =
+        inner_area.width >= COVER_WIDTH_CELLS + 14 && inner_area.height >= COVER_HEIGHT_CELLS;
+
+    if can_fit_cover && let Some(ref proto) = state.cover_image {
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(10),
+                Constraint::Length(1),
+                Constraint::Length(COVER_WIDTH_CELLS),
+            ])
+            .split(inner_area);
+
+        frame.render_widget(Paragraph::new(card_text), horizontal[0]);
+
+        let cover_rect = Rect {
+            x: horizontal[2].x,
+            y: horizontal[2].y,
+            width: horizontal[2].width.min(COVER_WIDTH_CELLS),
+            height: horizontal[2].height.min(COVER_HEIGHT_CELLS),
+        };
+        let image_widget = Image::new(proto);
+        frame.render_widget(image_widget, cover_rect);
+    } else {
+        frame.render_widget(Paragraph::new(card_text), inner_area);
+    }
 }
 
 pub fn render_progress(frame: &mut Frame, state: &AppState, area: Rect) {

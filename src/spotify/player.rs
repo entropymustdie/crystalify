@@ -58,12 +58,16 @@ impl SpotifyPlayer {
             .collect::<Vec<_>>()
             .join(", ");
 
+        let cover_url = crate::spotify::client::select_cover_url_from_images(&track.album.covers)
+            .or_else(|| crate::spotify::client::select_cover_url_from_images(&track.album.cover_group));
+
         Ok(TrackMetadata {
             uri: uri.to_uri(),
             title: track.name,
             artist,
             album: track.album.name,
             duration_ms: track.duration as u32,
+            cover_url,
         })
     }
 

@@ -42,7 +42,6 @@ const OAUTH_SUCCESS_HTML: &str = r#"<!doctype html>
 </body>
 </html>"#;
 
-/// Supported interactive authentication methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethod {
     OAuth,
@@ -50,8 +49,6 @@ pub enum AuthMethod {
     Password,
 }
 
-/// Parse user menu choice into an [`AuthMethod`].
-/// Empty input (pressing Enter) or "1" selects OAuth (browser / Google).
 pub fn parse_auth_choice(input: &str) -> Result<AuthMethod, &'static str> {
     match input.trim() {
         "" | "1" | "oauth" | "google" | "browser" => Ok(AuthMethod::OAuth),
@@ -61,16 +58,13 @@ pub fn parse_auth_choice(input: &str) -> Result<AuthMethod, &'static str> {
     }
 }
 
-/// Securely overwrite a string's underlying UTF-8 bytes with zeros and clear it.
 pub fn zeroize_string(s: &mut String) {
-    // SAFETY: Filling with 0x00 bytes produces valid UTF-8 (all NULs), and we immediately clear the string.
     unsafe {
         s.as_bytes_mut().fill(0);
     }
     s.clear();
 }
 
-/// Resolve the cache directory path from `$XDG_CACHE_HOME` or `$HOME/.cache`.
 pub fn resolve_cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     if let Some(xdg) = xdg_cache_home.filter(|s| !s.trim().is_empty()) {
         return Some(PathBuf::from(xdg).join("crystalify"));
@@ -81,14 +75,12 @@ pub fn resolve_cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) 
     None
 }
 
-/// Get the default cache directory path for crystalify.
 pub fn get_cache_dir() -> Option<PathBuf> {
     let xdg = env::var("XDG_CACHE_HOME").ok();
     let home = env::var("HOME").ok();
     resolve_cache_dir_from(xdg.as_deref(), home.as_deref())
 }
 
-/// Initialize a `librespot` [`Cache`] at the given directory with `0700` permissions on Unix.
 pub fn init_cache_at(dir: &Path) -> Result<Cache, Box<dyn std::error::Error>> {
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -101,28 +93,20 @@ pub fn init_cache_at(dir: &Path) -> Result<Cache, Box<dyn std::error::Error>> {
     Ok(cache)
 }
 
-/// Initialize the default `librespot` [`Cache`].
 pub fn init_cache() -> Option<Cache> {
     let dir = get_cache_dir()?;
     init_cache_at(&dir).ok()
 }
 
-/// Action produced by processing a single key event during masked password input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PasswordKeyAction {
-    /// No terminal output needed.
     None,
-    /// Print `*` to mask the newly added character.
     EchoStar,
-    /// Erase the last `*` on screen (`\x08 \x08`).
     EraseStar,
-    /// Password entry finished (Enter pressed).
     Submit,
-    /// Password entry cancelled (Ctrl+C or Esc pressed).
     Cancel,
 }
 
-/// Pure function to process a single [`KeyEvent`] and mutate the password buffer accordingly.
 pub fn handle_password_key(key: KeyEvent, buffer: &mut String) -> PasswordKeyAction {
     if key.kind != KeyEventKind::Press {
         return PasswordKeyAction::None;
@@ -162,7 +146,6 @@ pub fn handle_password_key(key: KeyEvent, buffer: &mut String) -> PasswordKeyAct
     }
 }
 
-/// RAII guard to ensure terminal raw mode is always disabled when leaving scope.
 struct RawModeGuard;
 
 impl RawModeGuard {
@@ -178,7 +161,6 @@ impl Drop for RawModeGuard {
     }
 }
 
-/// Read a password from the terminal, masking each typed character with `*`.
 pub fn read_password_masked(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
     print!("{prompt}");
     io::stdout().flush()?;
@@ -324,7 +306,6 @@ pub async fn authenticate() -> Result<Session, Box<dyn std::error::Error>> {
     let has_env_token = !env_token.trim().is_empty();
     let has_env_user_pass = !env_username.trim().is_empty() && !env_password.trim().is_empty();
 
-    // 1. Try cached credentials first if no explicit environment credentials override them
     if !has_env_token
         && !has_env_user_pass
         && let Some(ref c) = cache
@@ -346,7 +327,6 @@ pub async fn authenticate() -> Result<Session, Box<dyn std::error::Error>> {
         }
     }
 
-    // 2. Otherwise determine credentials from environment variables or interactive menu
     let credentials = if has_env_token {
         let creds = Credentials::with_access_token(env_token.trim());
         zeroize_string(&mut env_token);
@@ -399,14 +379,12 @@ mod tests {
         assert!(secret.is_empty());
         assert_eq!(secret.len(), 0);
 
-        // Verify the underlying allocation bytes were overwritten with zeros
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         assert!(slice.iter().all(|&b| b == 0));
     }
 
     #[test]
     fn test_parse_auth_choice() {
-        // Default (Enter) and "1" -> OAuth
         assert_eq!(parse_auth_choice(""), Ok(AuthMethod::OAuth));
         assert_eq!(parse_auth_choice("   \n "), Ok(AuthMethod::OAuth));
         assert_eq!(parse_auth_choice("1"), Ok(AuthMethod::OAuth));
@@ -414,15 +392,12 @@ mod tests {
         assert_eq!(parse_auth_choice("google"), Ok(AuthMethod::OAuth));
         assert_eq!(parse_auth_choice("oauth"), Ok(AuthMethod::OAuth));
 
-        // "2" -> Discovery
         assert_eq!(parse_auth_choice("2"), Ok(AuthMethod::Discovery));
         assert_eq!(parse_auth_choice("discovery"), Ok(AuthMethod::Discovery));
 
-        // "3" -> Password
         assert_eq!(parse_auth_choice("3"), Ok(AuthMethod::Password));
         assert_eq!(parse_auth_choice("password"), Ok(AuthMethod::Password));
 
-        // Invalid choices
         assert!(parse_auth_choice("4").is_err());
         assert!(parse_auth_choice("invalid").is_err());
     }
@@ -431,7 +406,6 @@ mod tests {
     fn test_handle_password_key_typing_and_submit() {
         let mut buf = String::new();
 
-        // Normal ASCII characters
         assert_eq!(
             handle_password_key(
                 make_key(KeyCode::Char('s'), KeyModifiers::NONE, KeyEventKind::Press),
@@ -446,7 +420,6 @@ mod tests {
             ),
             PasswordKeyAction::EchoStar
         );
-        // Unicode / Cyrillic character
         assert_eq!(
             handle_password_key(
                 make_key(KeyCode::Char('ї'), KeyModifiers::NONE, KeyEventKind::Press),
@@ -456,7 +429,6 @@ mod tests {
         );
         assert_eq!(buf, "sPї");
 
-        // KeyRelease events should be ignored
         assert_eq!(
             handle_password_key(
                 make_key(
@@ -470,7 +442,6 @@ mod tests {
         );
         assert_eq!(buf, "sPї");
 
-        // Backspace removes the multibyte character 'ї'
         assert_eq!(
             handle_password_key(
                 make_key(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Press),
@@ -480,7 +451,6 @@ mod tests {
         );
         assert_eq!(buf, "sP");
 
-        // Enter submits
         assert_eq!(
             handle_password_key(
                 make_key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
@@ -510,7 +480,6 @@ mod tests {
         let ptr = buf.as_ptr();
         let len = buf.len();
 
-        // Ctrl+C cancels and zeroizes
         assert_eq!(
             handle_password_key(
                 make_key(
@@ -526,7 +495,6 @@ mod tests {
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         assert!(slice.iter().all(|&b| b == 0));
 
-        // Esc also cancels and zeroizes
         let mut buf2 = String::from("another_secret");
         assert_eq!(
             handle_password_key(
@@ -573,7 +541,6 @@ mod tests {
             assert_eq!(mode, 0o700);
         }
 
-        // Verify saving and loading token credentials works without storing plaintext password
         let creds = Credentials::with_access_token("test_oauth_token_blob");
         cache.save_credentials(&creds);
         let loaded = cache.credentials().expect("Should load saved credentials");

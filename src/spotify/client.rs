@@ -4,6 +4,7 @@ use crate::spotify::models::{
 use futures_util::stream::{self, StreamExt};
 use librespot::core::session::Session;
 use librespot::core::spotify_uri::SpotifyUri;
+use librespot::metadata::image::Images;
 use librespot::metadata::{Album, Artist, Metadata, Playlist, Track};
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -22,13 +23,11 @@ pub struct SpotifyClient {
     http: Client,
 }
 
-/// Extract the base62 ID from a Spotify URI (`spotify:album:123` -> `123`) or return the string if already an ID.
 pub fn extract_spotify_id(uri_or_id: &str) -> &str {
     let trimmed = uri_or_id.trim();
     trimmed.rsplit(':').next().unwrap_or(trimmed)
 }
 
-/// Percent-encode a query parameter for URL construction.
 pub fn urlencode_query(input: &str) -> String {
     let mut out = String::with_capacity(input.len() * 2);
     for b in input.bytes() {
@@ -89,6 +88,66 @@ fn parse_pathfinder_artists(val: &Value) -> String {
     }
 }
 
+pub fn select_best_image_url_from_array(arr: &[Value]) -> Option<String> {
+    let mut best_ge_64: Option<(u64, &str)> = None;
+    let mut fallback: Option<&str> = None;
+
+    for img in arr {
+        let Some(url) = img
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if fallback.is_none() {
+            fallback = Some(url);
+        }
+        let dim = img
+            .get("width")
+            .and_then(Value::as_u64)
+            .or_else(|| img.get("height").and_then(Value::as_u64))
+            .unwrap_or(0);
+        if dim >= 64 {
+            match best_ge_64 {
+                None => best_ge_64 = Some((dim, url)),
+                Some((best_dim, _)) if dim < best_dim => best_ge_64 = Some((dim, url)),
+                _ => {}
+            }
+        }
+    }
+
+    best_ge_64
+        .map(|(_, u)| u.to_string())
+        .or_else(|| fallback.map(str::to_string))
+}
+
+pub fn select_cover_url_from_images(images: &Images) -> Option<String> {
+    let mut best_ge_64: Option<(i32, String)> = None;
+    let mut fallback: Option<String> = None;
+
+    for img in images.iter() {
+        let hex = img.id.to_base16();
+        if hex.is_empty() {
+            continue;
+        }
+        let url = format!("https://i.scdn.co/image/{hex}");
+        if fallback.is_none() {
+            fallback = Some(url.clone());
+        }
+        let dim = img.width.max(img.height);
+        if dim >= 64 {
+            match best_ge_64 {
+                None => best_ge_64 = Some((dim, url)),
+                Some((best_dim, _)) if dim < best_dim => best_ge_64 = Some((dim, url)),
+                _ => {}
+            }
+        }
+    }
+
+    best_ge_64.map(|(_, u)| u).or(fallback)
+}
+
 fn parse_track_item(item: &Value, fallback_album: Option<&str>) -> Option<TrackMetadata> {
     if item.is_null() {
         return None;
@@ -131,16 +190,22 @@ fn parse_track_item(item: &Value, fallback_album: Option<&str>) -> Option<TrackM
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
 
+    let cover_url = item
+        .get("album")
+        .and_then(|a| a.get("images"))
+        .and_then(Value::as_array)
+        .and_then(|arr| select_best_image_url_from_array(arr));
+
     Some(TrackMetadata {
         uri,
         title,
         artist,
         album,
         duration_ms,
+        cover_url,
     })
 }
 
-/// Parse Spotify's GraphQL Pathfinder `searchV2` response (`data.searchV2`) into [`SearchResults`].
 pub fn parse_pathfinder_search_response(json: &Value) -> SearchResults {
     let Some(search_v2) = json.get("data").and_then(|d| d.get("searchV2")) else {
         return SearchResults::default();
@@ -179,6 +244,12 @@ pub fn parse_pathfinder_search_response(json: &Value) -> SearchResults {
                         .and_then(|d| d.get("totalMilliseconds"))
                         .and_then(Value::as_u64)
                         .unwrap_or(0) as u32;
+                    let cover_url = data
+                        .get("albumOfTrack")
+                        .and_then(|a| a.get("coverArt"))
+                        .and_then(|c| c.get("sources"))
+                        .and_then(Value::as_array)
+                        .and_then(|arr| select_best_image_url_from_array(arr));
 
                     Some(TrackMetadata {
                         uri,
@@ -186,6 +257,7 @@ pub fn parse_pathfinder_search_response(json: &Value) -> SearchResults {
                         artist,
                         album,
                         duration_ms,
+                        cover_url,
                     })
                 })
                 .collect()
@@ -319,7 +391,6 @@ pub fn parse_pathfinder_search_response(json: &Value) -> SearchResults {
     }
 }
 
-/// Pure function to parse `/v1/search` (or Pathfinder `data.searchV2`) JSON into [`SearchResults`].
 pub fn parse_search_response(json: &Value) -> SearchResults {
     if json.get("data").and_then(|d| d.get("searchV2")).is_some() {
         return parse_pathfinder_search_response(json);
@@ -448,7 +519,6 @@ pub fn parse_search_response(json: &Value) -> SearchResults {
     }
 }
 
-/// Pure function to parse `/v1/albums/{id}/tracks` JSON into a list of [`TrackMetadata`].
 pub fn parse_album_tracks_response(json: &Value, album_name: &str) -> Vec<TrackMetadata> {
     json.get("items")
         .and_then(Value::as_array)
@@ -461,7 +531,6 @@ pub fn parse_album_tracks_response(json: &Value, album_name: &str) -> Vec<TrackM
         .unwrap_or_default()
 }
 
-/// Pure function to parse `/v1/artists/{id}/top-tracks` JSON into a list of [`TrackMetadata`].
 pub fn parse_artist_top_tracks_response(json: &Value) -> Vec<TrackMetadata> {
     json.get("tracks")
         .and_then(Value::as_array)
@@ -474,7 +543,6 @@ pub fn parse_artist_top_tracks_response(json: &Value) -> Vec<TrackMetadata> {
         .unwrap_or_default()
 }
 
-/// Pure function to parse `/v1/playlists/{id}/tracks` JSON into a list of [`TrackMetadata`].
 pub fn parse_playlist_tracks_response(json: &Value) -> Vec<TrackMetadata> {
     json.get("items")
         .and_then(Value::as_array)
@@ -612,7 +680,6 @@ impl SpotifyClient {
             return Ok(SearchResults::default());
         }
 
-        // 1. Primary: Spotify Partner Pathfinder GraphQL API (supports Tracks, Albums, Artists, Playlists without 429 rate-limits)
         if let Ok(results) = self.search_via_pathfinder(trimmed).await
             && (!results.tracks.is_empty()
                 || !results.albums.is_empty()
@@ -622,14 +689,12 @@ impl SpotifyClient {
             return Ok(results);
         }
 
-        // 2. Secondary fallback: spclient context resolver for tracks
         if let Ok(results) = self.search_via_spclient_context(trimmed).await
             && !results.tracks.is_empty()
         {
             return Ok(results);
         }
 
-        // 3. Final fallback: public Web API /v1/search
         self.search_via_web_api(trimmed).await
     }
 
@@ -651,7 +716,6 @@ impl SpotifyClient {
         album_uri: &str,
         album_name: &str,
     ) -> Result<Vec<TrackMetadata>, BoxError> {
-        // 1. Primary: native librespot metadata over spclient (never hits 429)
         if let Ok(parsed_uri) = SpotifyUri::from_uri(album_uri)
             && let Ok(album) = Album::get(&self.session, &parsed_uri).await
         {
@@ -660,17 +724,25 @@ impl SpotifyClient {
             } else {
                 album.name.clone()
             };
+            let album_cover_url = select_cover_url_from_images(&album.covers)
+                .or_else(|| select_cover_url_from_images(&album.cover_group));
             let track_uris: Vec<SpotifyUri> = album.tracks().take(50).cloned().collect();
-            if let Ok(tracks) = self
+            if let Ok(mut tracks) = self
                 .fetch_tracks_via_metadata(&track_uris, Some(&resolved_album_name))
                 .await
                 && !tracks.is_empty()
             {
+                if let Some(ref fallback_cover) = album_cover_url {
+                    for t in &mut tracks {
+                        if t.cover_url.is_none() {
+                            t.cover_url = Some(fallback_cover.clone());
+                        }
+                    }
+                }
                 return Ok(tracks);
             }
         }
 
-        // 2. Fallback: Web API
         let id = extract_spotify_id(album_uri);
         let token = self.get_access_token().await?;
         let url = format!("{SPOTIFY_API_BASE}/albums/{id}/tracks?limit=50");
@@ -682,8 +754,16 @@ impl SpotifyClient {
         Ok(parse_album_tracks_response(&json, album_name))
     }
 
+    pub async fn fetch_image_bytes(&self, url: &str) -> Result<Vec<u8>, BoxError> {
+        let resp = self.http.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(format!("Failed to fetch cover image ({})", resp.status()).into());
+        }
+        let bytes = resp.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
     pub async fn get_artist_tracks(&self, artist_uri: &str) -> Result<Vec<TrackMetadata>, BoxError> {
-        // 1. Primary: native librespot metadata over spclient (never hits 429)
         if let Ok(parsed_uri) = SpotifyUri::from_uri(artist_uri)
             && let Ok(artist) = Artist::get(&self.session, &parsed_uri).await
         {
@@ -709,7 +789,6 @@ impl SpotifyClient {
             }
         }
 
-        // 2. Fallback: Web API
         let id = extract_spotify_id(artist_uri);
         let token = self.get_access_token().await?;
         let url = format!("{SPOTIFY_API_BASE}/artists/{id}/top-tracks");
@@ -725,7 +804,6 @@ impl SpotifyClient {
         &self,
         playlist_uri: &str,
     ) -> Result<Vec<TrackMetadata>, BoxError> {
-        // 1. Primary: native librespot metadata over spclient (never hits 429)
         if let Ok(parsed_uri) = SpotifyUri::from_uri(playlist_uri)
             && let Ok(playlist) = Playlist::get(&self.session, &parsed_uri).await
         {
@@ -737,7 +815,6 @@ impl SpotifyClient {
             }
         }
 
-        // 2. Fallback: Web API
         let id = extract_spotify_id(playlist_uri);
         let token = self.get_access_token().await?;
         let url = format!("{SPOTIFY_API_BASE}/playlists/{id}/tracks?limit=50");
@@ -749,7 +826,6 @@ impl SpotifyClient {
         Ok(parse_playlist_tracks_response(&json))
     }
 
-    /// Fetch multiple tracks concurrently (preserving order) via `librespot::metadata::Track::get`.
     async fn fetch_tracks_via_metadata(
         &self,
         uris: &[SpotifyUri],
@@ -770,6 +846,8 @@ impl SpotifyClient {
                         .map(|a| a.name.clone())
                         .collect::<Vec<_>>()
                         .join(", ");
+                    let cover_url = select_cover_url_from_images(&track.album.covers)
+                        .or_else(|| select_cover_url_from_images(&track.album.cover_group));
                     let album = if track.album.name.is_empty() {
                         fallback_album.unwrap_or_else(|| "Unknown Album".to_string())
                     } else {
@@ -785,6 +863,7 @@ impl SpotifyClient {
                         },
                         album,
                         duration_ms: track.duration as u32,
+                        cover_url,
                     })
                 }
             })
@@ -913,6 +992,90 @@ mod tests {
         assert_eq!(res.playlists.len(), 1);
         assert_eq!(res.playlists[0].name, "Tool Best of");
         assert_eq!(res.playlists[0].owner, "Fat Neck McGee");
+    }
+
+    #[test]
+    fn test_select_best_image_url_and_cover_parsing() {
+        let sources = vec![
+            json!({ "url": "https://i.scdn.co/image/large640", "width": 640, "height": 640 }),
+            json!({ "url": "https://i.scdn.co/image/small64", "width": 64, "height": 64 }),
+            json!({ "url": "https://i.scdn.co/image/med300", "width": 300, "height": 300 }),
+        ];
+        assert_eq!(
+            select_best_image_url_from_array(&sources),
+            Some("https://i.scdn.co/image/small64".to_string())
+        );
+
+        let tiny_only = vec![json!({ "url": "https://i.scdn.co/image/tiny32", "width": 32, "height": 32 })];
+        assert_eq!(
+            select_best_image_url_from_array(&tiny_only),
+            Some("https://i.scdn.co/image/tiny32".to_string())
+        );
+
+        assert_eq!(select_best_image_url_from_array(&[]), None);
+
+        let pf_json = json!({
+            "data": {
+                "searchV2": {
+                    "tracksV2": {
+                        "items": [
+                            {
+                                "item": {
+                                    "data": {
+                                        "uri": "spotify:track:03sEzk1VyrUZSgyhoQR0LZ",
+                                        "name": "Pneuma",
+                                        "duration": { "totalMilliseconds": 713191 },
+                                        "albumOfTrack": {
+                                            "name": "Fear Inoculum",
+                                            "coverArt": {
+                                                "sources": [
+                                                    { "url": "https://i.scdn.co/image/pf300", "width": 300, "height": 300 },
+                                                    { "url": "https://i.scdn.co/image/pf64", "width": 64, "height": 64 }
+                                                ]
+                                            }
+                                        },
+                                        "artists": {
+                                            "items": [{ "profile": { "name": "TOOL" } }]
+                                        }
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+        let pf_res = parse_pathfinder_search_response(&pf_json);
+        assert_eq!(
+            pf_res.tracks[0].cover_url,
+            Some("https://i.scdn.co/image/pf64".to_string())
+        );
+
+        let web_json = json!({
+            "tracks": {
+                "items": [
+                    {
+                        "id": "t1",
+                        "uri": "spotify:track:t1",
+                        "name": "Starlight",
+                        "duration_ms": 240000,
+                        "artists": [{ "name": "Muse" }],
+                        "album": {
+                            "name": "Black Holes and Revelations",
+                            "images": [
+                                { "url": "https://i.scdn.co/image/web640", "width": 640, "height": 640 },
+                                { "url": "https://i.scdn.co/image/web64", "width": 64, "height": 64 }
+                            ]
+                        }
+                    }
+                ]
+            }
+        });
+        let web_res = parse_search_response(&web_json);
+        assert_eq!(
+            web_res.tracks[0].cover_url,
+            Some("https://i.scdn.co/image/web64".to_string())
+        );
     }
 
     #[test]
@@ -1103,7 +1266,28 @@ mod tests {
         assert!(!results.artists.is_empty(), "Artists should not be empty");
         assert!(!results.playlists.is_empty(), "Playlists should not be empty");
 
-        // Test loading Album tracks
+        let pf_cover = results.tracks[0]
+            .cover_url
+            .as_ref()
+            .expect("Pathfinder search track should have cover_url");
+        assert!(pf_cover.starts_with("https://"));
+
+        let cover_bytes = client
+            .fetch_image_bytes(pf_cover)
+            .await
+            .expect("fetch_image_bytes should succeed for track cover_url");
+        assert!(!cover_bytes.is_empty());
+        let decoded_img = image::load_from_memory(&cover_bytes)
+            .expect("Downloaded cover bytes should decode as valid image");
+        println!(
+            "Downloaded and decoded Pathfinder cover ({}): {}x{} px ({} bytes)",
+            pf_cover,
+            decoded_img.width(),
+            decoded_img.height(),
+            cover_bytes.len()
+        );
+        assert!(decoded_img.width() > 0 && decoded_img.width() <= 640);
+
         let album = &results.albums[0];
         let album_tracks = client
             .get_album_tracks(&album.uri, &album.name)
@@ -1111,8 +1295,32 @@ mod tests {
             .expect("get_album_tracks should succeed");
         println!("Album '{}' loaded {} tracks (first: '{}')", album.name, album_tracks.len(), album_tracks[0].title);
         assert!(!album_tracks.is_empty());
+        let native_cover = album_tracks[0]
+            .cover_url
+            .as_ref()
+            .expect("Native librespot album track should have cover_url");
+        assert!(native_cover.starts_with("https://i.scdn.co/image/"));
+        let native_bytes = client
+            .fetch_image_bytes(native_cover)
+            .await
+            .expect("fetch_image_bytes should succeed for native cover_url");
+        let native_decoded = image::load_from_memory(&native_bytes)
+            .expect("Native cover bytes should decode as valid image");
+        println!(
+            "Downloaded and decoded librespot native cover ({}): {}x{} px",
+            native_cover,
+            native_decoded.width(),
+            native_decoded.height()
+        );
+        assert!(native_decoded.width() > 0 && native_decoded.width() <= 640);
 
-        // Test loading Artist top tracks
+        assert!(
+            client
+                .fetch_image_bytes("https://i.scdn.co/image/0000000000000000000000000000000000000000")
+                .await
+                .is_err()
+        );
+
         let artist = &results.artists[0];
         let artist_tracks = client
             .get_artist_tracks(&artist.uri)
@@ -1121,7 +1329,6 @@ mod tests {
         println!("Artist '{}' loaded {} top tracks (first: '{}')", artist.name, artist_tracks.len(), artist_tracks[0].title);
         assert!(!artist_tracks.is_empty());
 
-        // Test loading Playlist tracks
         let playlist = &results.playlists[0];
         let playlist_tracks = client
             .get_playlist_tracks(&playlist.uri)
@@ -1135,14 +1342,12 @@ mod tests {
         );
         assert!(!playlist_tracks.is_empty());
 
-        // Edge case 1: Empty / whitespace query
         let empty_res = client.search("   ").await.expect("empty search should succeed");
         assert!(empty_res.tracks.is_empty());
         assert!(empty_res.albums.is_empty());
         assert!(empty_res.artists.is_empty());
         assert!(empty_res.playlists.is_empty());
 
-        // Edge case 2: Cyrillic query ("Океан Ельзи")
         let cyrillic_res = client
             .search("Океан Ельзи")
             .await
@@ -1158,7 +1363,6 @@ mod tests {
         assert!(!cyrillic_res.albums.is_empty());
         assert!(!cyrillic_res.artists.is_empty());
 
-        // Edge case 3: Special characters & rapid repeated queries (no 429 rate-limit)
         for q in ["AC/DC & Friends", "Pink Floyd", "Tool - Schism"] {
             let r = client
                 .search(q)

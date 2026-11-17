@@ -739,6 +739,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "glam",
+ "image",
  "librespot",
  "ratatui",
  "ratatui-image",

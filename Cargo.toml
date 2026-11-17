@@ -8,6 +8,7 @@ license = "Apache-2.0"
 crossterm = "0.29.0"
 futures-util = "0.3.34"
 glam = "0.33.11"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 librespot = { git = "https://github.com/librespot-org/librespot" }
 ratatui = "0.30.2"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm", "image-defaults"] }

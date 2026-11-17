@@ -5,6 +5,7 @@ pub struct TrackMetadata {
     pub artist: String,
     pub album: String,
     pub duration_ms: u32,
+    pub cover_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

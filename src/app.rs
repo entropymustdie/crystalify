@@ -1,7 +1,18 @@
 use crate::spotify::models::{
     CollectionKind, CollectionView, SearchCategory, SearchResults, TrackMetadata,
 };
+use image::DynamicImage;
 use librespot::playback::player::PlayerEvent;
+use ratatui::layout::Size;
+use ratatui_image::{
+    FilterType, Resize,
+    picker::Picker,
+    protocol::Protocol,
+};
+use std::collections::HashMap;
+
+pub const COVER_WIDTH_CELLS: u16 = 12;
+pub const COVER_HEIGHT_CELLS: u16 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
@@ -15,6 +26,7 @@ pub struct AppState {
     pub track_title: String,
     pub track_artist: String,
     pub track_album: String,
+    pub track_cover_url: Option<String>,
     pub duration_ms: u32,
     pub position_ms: u32,
     pub is_playing: bool,
@@ -22,7 +34,10 @@ pub struct AppState {
     pub username: String,
     pub device_name: String,
 
-    // Search & browser state
+    pub picker: Picker,
+    pub cover_image: Option<Protocol>,
+    pub cover_cache: HashMap<String, DynamicImage>,
+
     pub input_mode: InputMode,
     pub search_query: String,
     pub is_loading: bool,
@@ -33,7 +48,6 @@ pub struct AppState {
     pub opened_collection: Option<CollectionView>,
     pub collection_selected_index: usize,
 
-    // Playback queue
     pub queue: Vec<TrackMetadata>,
     pub queue_index: usize,
     pub pending_next_track: bool,
@@ -46,12 +60,16 @@ impl AppState {
             track_title: "No Track Playing".to_string(),
             track_artist: "Press [/] to search songs, albums, artists, playlists".to_string(),
             track_album: "—".to_string(),
+            track_cover_url: None,
             duration_ms: 0,
             position_ms: 0,
             is_playing: false,
             volume,
             username,
             device_name,
+            picker: Picker::halfblocks(),
+            cover_image: None,
+            cover_cache: HashMap::new(),
             input_mode: InputMode::Normal,
             search_query: String::new(),
             is_loading: false,
@@ -69,14 +87,48 @@ impl AppState {
         }
     }
 
+    pub fn set_picker(&mut self, picker: Picker) {
+        self.picker = picker;
+        self.refresh_cover_protocol();
+    }
+
     pub fn set_track(&mut self, meta: TrackMetadata) {
         self.track_uri = meta.uri;
         self.track_title = meta.title;
         self.track_artist = meta.artist;
         self.track_album = meta.album;
+        self.track_cover_url = meta.cover_url;
         self.duration_ms = meta.duration_ms;
         self.position_ms = 0;
         self.is_playing = true;
+        self.refresh_cover_protocol();
+    }
+
+    pub fn cache_and_apply_cover(&mut self, url: String, img: DynamicImage) {
+        self.cover_cache.insert(url.clone(), img);
+        if self.track_cover_url.as_deref() == Some(url.as_str()) {
+            self.refresh_cover_protocol();
+        }
+    }
+
+    pub fn refresh_cover_protocol(&mut self) {
+        let Some(ref url) = self.track_cover_url else {
+            self.cover_image = None;
+            return;
+        };
+        let Some(dyn_img) = self.cover_cache.get(url) else {
+            self.cover_image = None;
+            return;
+        };
+        let target_size = Size::new(COVER_WIDTH_CELLS, COVER_HEIGHT_CELLS);
+        self.cover_image = self
+            .picker
+            .new_protocol(
+                dyn_img.clone(),
+                target_size,
+                Resize::Fit(Some(FilterType::Triangle)),
+            )
+            .ok();
     }
 
     pub fn current_list_len(&self) -> usize {
@@ -259,6 +311,7 @@ mod tests {
                 artist: "Artist A".to_string(),
                 album: "Album X".to_string(),
                 duration_ms: 180_000,
+                cover_url: Some("https://i.scdn.co/image/ab67616d00004851111111111111111111111111".to_string()),
             },
             TrackMetadata {
                 uri: "spotify:track:2".to_string(),
@@ -266,6 +319,7 @@ mod tests {
                 artist: "Artist B".to_string(),
                 album: "Album Y".to_string(),
                 duration_ms: 200_000,
+                cover_url: None,
             },
             TrackMetadata {
                 uri: "spotify:track:3".to_string(),
@@ -273,6 +327,7 @@ mod tests {
                 artist: "Artist C".to_string(),
                 album: "Album Z".to_string(),
                 duration_ms: 220_000,
+                cover_url: None,
             },
         ]
     }
@@ -306,14 +361,11 @@ mod tests {
         assert_eq!(state.selected_index, 1);
         state.move_selection_down();
         assert_eq!(state.selected_index, 2);
-        // Wraps around to 0
         state.move_selection_down();
         assert_eq!(state.selected_index, 0);
-        // Wraps around to end when moving up from 0
         state.move_selection_up();
         assert_eq!(state.selected_index, 2);
 
-        // Open collection and verify independent selection index
         state.open_collection(
             CollectionKind::Album,
             "My Album".to_string(),
@@ -324,7 +376,7 @@ mod tests {
         assert_eq!(state.active_selected_index(), 0);
         state.move_selection_down();
         assert_eq!(state.collection_selected_index, 1);
-        assert_eq!(state.selected_index, 2); // search selection preserved
+        assert_eq!(state.selected_index, 2);
 
         assert!(state.close_collection());
         assert!(state.opened_collection.is_none());
@@ -353,7 +405,6 @@ mod tests {
         assert_eq!(prev.title, "Song Two");
         assert_eq!(state.queue_index, 1);
 
-        // Simulate EndOfTrack event
         let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
         state.handle_player_event(PlayerEvent::EndOfTrack {
             play_request_id: 1,
@@ -362,7 +413,6 @@ mod tests {
         assert!(!state.is_playing);
         assert!(state.pending_next_track);
 
-        // Ensure Albums category length works too
         state.set_category(SearchCategory::Albums);
         state.search_results.albums.push(AlbumItem {
             uri: "spotify:album:1".to_string(),
@@ -385,15 +435,12 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 32768);
 
-        // 1. Initial empty state
         terminal.draw(|f| draw_ui(f, &state)).unwrap();
 
-        // 2. Editing search mode with Cyrillic & special chars
         state.input_mode = InputMode::EditingSearch;
         state.search_query = "Океан Ельзи & Tool".to_string();
         terminal.draw(|f| draw_ui(f, &state)).unwrap();
 
-        // 3. Populated search results across all 4 tabs
         state.input_mode = InputMode::Normal;
         state.search_results.tracks = sample_tracks();
         state.search_results.albums.push(AlbumItem {
@@ -427,7 +474,6 @@ mod tests {
             terminal.draw(|f| draw_ui(f, &state)).unwrap();
         }
 
-        // 4. Opened collection state & error message display
         state.open_collection(
             CollectionKind::Album,
             "Lateralus".to_string(),
@@ -444,9 +490,9 @@ mod tests {
         use crate::ui::theme::{MUTED, PRIMARY, TEXT};
         use ratatui::{Terminal, backend::TestBackend, style::Color};
 
-        let primary_rgb = Color::Rgb(236, 153, 255); // #EC99FF
-        let text_rgb = Color::Rgb(221, 230, 246); // #DDE6F6
-        let muted_rgb = Color::Rgb(87, 124, 171); // #577CAB
+        let primary_rgb = Color::Rgb(236, 153, 255);
+        let text_rgb = Color::Rgb(221, 230, 246);
+        let muted_rgb = Color::Rgb(87, 124, 171);
 
         assert_eq!(PRIMARY, primary_rgb);
         assert_eq!(TEXT, text_rgb);
@@ -457,11 +503,9 @@ mod tests {
         let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 32768);
         state.search_results.tracks = sample_tracks();
 
-        // Render in PAUSED state first
         terminal.draw(|f| draw_ui(f, &state)).unwrap();
         let buf = terminal.backend().buffer();
 
-        // Collect all rendered text from buffer
         let mut full_text = String::new();
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
@@ -470,7 +514,6 @@ mod tests {
             full_text.push('\n');
         }
 
-        // Verify "Spotify Terminal Player" is completely gone and " crystalify " is present
         assert!(
             !full_text.contains("Spotify Terminal Player"),
             "Buffer must not contain 'Spotify Terminal Player'"
@@ -480,10 +523,8 @@ mod tests {
             "Buffer must contain ' crystalify ' title"
         );
 
-        // Verify root border top-left corner cell has PRIMARY fg (#EC99FF)
         assert_eq!(buf[(0, 0)].fg, primary_rgb);
 
-        // Find "[PAUSED]" badge and verify its background is MUTED (#577CAB)
         let mut found_paused_bg = false;
         let mut found_active_tab_bg = false;
         let mut found_inactive_tab_fg = false;
@@ -514,9 +555,8 @@ mod tests {
             "Should find inactive tab [2] Albums with MUTED fg"
         );
 
-        // Now switch to PLAYING state at 50% progress and verify [PLAYING], Gauge, and track colors
         state.start_playback_queue(sample_tracks(), 0);
-        state.position_ms = 90_000; // 50% of 180_000ms
+        state.position_ms = 90_000;
         terminal.draw(|f| draw_ui(f, &state)).unwrap();
         let buf = terminal.backend().buffer();
 
@@ -538,12 +578,11 @@ mod tests {
                 assert_eq!(buf[(col as u16, y)].fg, muted_rgb);
                 found_title_label_muted = true;
             }
-            if let Some(col) = row_str.find("Song One") {
-                // In Now Playing card, Song One has TEXT fg
-                if col < 40 {
-                    assert_eq!(buf[(col as u16, y)].fg, text_rgb);
-                    found_song_title_text = true;
-                }
+            if let Some(col) = row_str.find("Song One")
+                && col < 40
+            {
+                assert_eq!(buf[(col as u16, y)].fg, text_rgb);
+                found_song_title_text = true;
             }
             for x in 1..40 {
                 let cell = &buf[(x, y)];
@@ -570,5 +609,64 @@ mod tests {
             found_gauge_primary && found_gauge_muted,
             "Should find Gauge cells with PRIMARY fg and MUTED bg"
         );
+    }
+
+    #[test]
+    fn test_cover_caching_and_now_playing_rendering_with_and_without_cover() {
+        use crate::ui::draw_ui;
+        use image::{DynamicImage, Rgba, RgbaImage};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 32768);
+        let tracks = sample_tracks();
+        let cover_url = tracks[0].cover_url.clone().unwrap();
+
+        state.start_playback_queue(tracks.clone(), 0);
+        assert!(state.cover_image.is_none());
+
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(64, 64, Rgba([236, 153, 255, 255])));
+        state.cache_and_apply_cover(cover_url.clone(), img);
+        assert!(state.cover_image.is_some());
+        assert!(state.cover_cache.contains_key(&cover_url));
+
+        state.next_track();
+        assert!(state.cover_image.is_none());
+
+        state.prev_track();
+        assert!(state.cover_image.is_some());
+
+        let backend = TestBackend::new(120, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_ui(f, &state)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let mut full_text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                full_text.push_str(buf[(x, y)].symbol());
+            }
+            full_text.push('\n');
+        }
+        assert!(full_text.contains("[PLAYING]"));
+        assert!(full_text.contains("Title:  Song One"));
+        assert!(full_text.contains("Artist: Artist A"));
+        assert!(full_text.contains("Album:  Album X"));
+
+        let mut has_halfblock_in_top_right_of_now_playing = false;
+        for y in 5..11 {
+            for x in 27..41 {
+                let sym = buf[(x, y)].symbol();
+                if sym == "▀" || sym == "▄" || sym == "█" || buf[(x, y)].bg != ratatui::style::Color::Reset {
+                    has_halfblock_in_top_right_of_now_playing = true;
+                }
+            }
+        }
+        assert!(has_halfblock_in_top_right_of_now_playing);
+
+        for (w, h) in [(30, 12), (18, 8), (10, 5)] {
+            let small_backend = TestBackend::new(w, h);
+            let mut small_term = Terminal::new(small_backend).unwrap();
+            small_term.draw(|f| draw_ui(f, &state)).unwrap();
+        }
     }
 }

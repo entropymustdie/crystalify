@@ -8,8 +8,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use image::DynamicImage;
 use librespot::core::spotify_uri::SpotifyUri;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui_image::picker::Picker;
 use spotify::auth::authenticate;
 use spotify::client::SpotifyClient;
 use spotify::models::{CollectionKind, SearchCategory, SearchResults, TrackMetadata};
@@ -29,11 +31,48 @@ enum AsyncResult {
         tracks: Result<Vec<TrackMetadata>, String>,
         auto_play_all: bool,
     },
+    CoverLoaded {
+        url: String,
+        image: DynamicImage,
+    },
 }
 
-fn load_track_into_player(player: &SpotifyPlayer, state: &mut AppState, track: &TrackMetadata) {
+fn spawn_cover_fetch_if_needed(
+    state: &AppState,
+    client: &SpotifyClient,
+    tx: &UnboundedSender<AsyncResult>,
+) {
+    let Some(ref url) = state.track_cover_url else {
+        return;
+    };
+    if url.is_empty() || state.cover_cache.contains_key(url) {
+        return;
+    }
+    let url_clone = url.clone();
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    tokio::spawn(async move {
+        if let Ok(bytes) = client_clone.fetch_image_bytes(&url_clone).await
+            && let Ok(decoded) = image::load_from_memory(&bytes)
+        {
+            let _ = tx_clone.send(AsyncResult::CoverLoaded {
+                url: url_clone,
+                image: decoded,
+            });
+        }
+    });
+}
+
+fn load_track_into_player(
+    player: &SpotifyPlayer,
+    state: &mut AppState,
+    client: &SpotifyClient,
+    tx: &UnboundedSender<AsyncResult>,
+    track: &TrackMetadata,
+) {
     if let Ok(uri) = SpotifyUri::from_uri(&track.uri) {
         player.load(uri);
+        spawn_cover_fetch_if_needed(state, client, tx);
     } else {
         state.status_message = Some(format!("Invalid track URI: {}", track.uri));
     }
@@ -158,7 +197,6 @@ fn handle_key_event(
         return false;
     }
 
-    // Normal mode
     match key.code {
         KeyCode::Char('q') => {
             player.stop();
@@ -212,7 +250,7 @@ fn handle_key_event(
                 if let Some(track) = state.start_playback_queue(tracks, idx) {
                     state.status_message =
                         Some(format!("Playing '{}' — {}", track.title, track.artist));
-                    load_track_into_player(player, state, &track);
+                    load_track_into_player(player, state, client, tx, &track);
                 }
             } else if state.search_category == SearchCategory::Tracks {
                 let tracks = state.search_results.tracks.clone();
@@ -220,7 +258,7 @@ fn handle_key_event(
                 if let Some(track) = state.start_playback_queue(tracks, idx) {
                     state.status_message =
                         Some(format!("Playing '{}' — {}", track.title, track.artist));
-                    load_track_into_player(player, state, &track);
+                    load_track_into_player(player, state, client, tx, &track);
                 }
             } else {
                 trigger_collection_load(state, client, tx, false);
@@ -233,7 +271,7 @@ fn handle_key_event(
                 if let Some(track) = state.start_playback_queue(tracks, 0) {
                     state.status_message =
                         Some(format!("Playing all from '{title}': '{}'", track.title));
-                    load_track_into_player(player, state, &track);
+                    load_track_into_player(player, state, client, tx, &track);
                 }
             } else if state.search_category == SearchCategory::Tracks {
                 let tracks = state.search_results.tracks.clone();
@@ -241,7 +279,7 @@ fn handle_key_event(
                 if let Some(track) = state.start_playback_queue(tracks, idx) {
                     state.status_message =
                         Some(format!("Playing '{}' — {}", track.title, track.artist));
-                    load_track_into_player(player, state, &track);
+                    load_track_into_player(player, state, client, tx, &track);
                 }
             } else {
                 trigger_collection_load(state, client, tx, true);
@@ -251,7 +289,7 @@ fn handle_key_event(
             if let Some(track) = state.next_track() {
                 state.status_message =
                     Some(format!("Next track: '{}' — {}", track.title, track.artist));
-                load_track_into_player(player, state, &track);
+                load_track_into_player(player, state, client, tx, &track);
             } else {
                 state.status_message = Some("End of playback queue".to_string());
             }
@@ -262,7 +300,7 @@ fn handle_key_event(
                     "Previous track: '{}' — {}",
                     track.title, track.artist
                 ));
-                load_track_into_player(player, state, &track);
+                load_track_into_player(player, state, client, tx, &track);
             } else {
                 state.status_message = Some("Already at start of queue".to_string());
             }
@@ -314,16 +352,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = AppState::new(username, device_name, initial_volume);
 
+    let (async_tx, mut async_rx) = mpsc::unbounded_channel::<AsyncResult>();
+
     if let Some(track_arg) = env::args().nth(1)
         && let Ok(track_uri) = SpotifyUri::from_uri(&track_arg)
     {
-        if let Ok(meta) = SpotifyPlayer::fetch_metadata(&session, &track_uri).await {
-            state.start_playback_queue(vec![meta], 0);
+        if let Ok(meta) = SpotifyPlayer::fetch_metadata(&session, &track_uri).await
+            && let Some(track) = state.start_playback_queue(vec![meta], 0)
+        {
+            load_track_into_player(&player, &mut state, &client, &async_tx, &track);
+        } else {
+            player.load(track_uri);
         }
-        player.load(track_uri);
     }
-
-    let (async_tx, mut async_rx) = mpsc::unbounded_channel::<AsyncResult>();
 
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -335,6 +376,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    state.set_picker(picker);
     let backend_terminal = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend_terminal)?;
 
@@ -351,14 +394,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Auto-playing next: '{}' — {}",
                             next.title, next.artist
                         ));
-                        load_track_into_player(&player, &mut state, &next);
+                        load_track_into_player(&player, &mut state, &client, &async_tx, &next);
                     }
                 }
             }
             Some(async_res) = async_rx.recv() => {
-                state.is_loading = false;
                 match async_res {
+                    AsyncResult::CoverLoaded { url, image } => {
+                        state.cache_and_apply_cover(url, image);
+                    }
                     AsyncResult::SearchCompleted(Ok(results)) => {
+                        state.is_loading = false;
                         let summary = format!(
                             "Found {} tracks, {} albums, {} artists, {} playlists",
                             results.tracks.len(),
@@ -372,6 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.status_message = Some(summary);
                     }
                     AsyncResult::SearchCompleted(Err(err)) => {
+                        state.is_loading = false;
                         state.status_message = Some(format!("Search failed: {err}"));
                     }
                     AsyncResult::CollectionTracksLoaded {
@@ -381,6 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tracks: Ok(tracks),
                         auto_play_all,
                     } => {
+                        state.is_loading = false;
                         if tracks.is_empty() {
                             state.status_message = Some(format!(
                                 "No playable tracks found in {} '{title}'",
@@ -395,7 +443,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         kind.label(),
                                         first.title
                                     ));
-                                    load_track_into_player(&player, &mut state, &first);
+                                    load_track_into_player(&player, &mut state, &client, &async_tx, &first);
                                 }
                             } else {
                                 state.status_message = Some(format!(
@@ -412,6 +460,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tracks: Err(err),
                         ..
                     } => {
+                        state.is_loading = false;
                         state.status_message = Some(format!(
                             "Failed to load {} '{title}': {err}",
                             kind.label()
