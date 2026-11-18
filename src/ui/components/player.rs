@@ -1,32 +1,28 @@
-use crate::app::{AppState, COVER_HEIGHT_CELLS, COVER_WIDTH_CELLS};
-use crate::ui::theme::{BADGE_FG, MUTED, PRIMARY, TEXT};
+use crate::app::{AppState, COVER_HEIGHT_CELLS, COVER_WIDTH_CELLS, PlaybackStatus};
+use crate::ui::theme::{BADGE_FG, ERROR, MUTED, PRIMARY, TEXT};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_image::Image;
 
 pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
-    let status_badge = if state.is_playing {
-        Span::styled(
-            " [PLAYING] ",
-            Style::default()
-                .bg(PRIMARY)
-                .fg(BADGE_FG)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(
-            " [PAUSED] ",
-            Style::default()
-                .bg(MUTED)
-                .fg(BADGE_FG)
-                .add_modifier(Modifier::BOLD),
-        )
+    let (badge_text, badge_bg) = match &state.playback_status {
+        PlaybackStatus::Loading => (" [LOADING] ", TEXT),
+        PlaybackStatus::Playing => (" [PLAYING] ", PRIMARY),
+        PlaybackStatus::Paused | PlaybackStatus::Idle => (" [PAUSED] ", MUTED),
+        PlaybackStatus::Failed(_) => (" [ERROR] ", ERROR),
     };
+    let status_badge = Span::styled(
+        badge_text,
+        Style::default()
+            .bg(badge_bg)
+            .fg(BADGE_FG)
+            .add_modifier(Modifier::BOLD),
+    );
 
-    let card_text = vec![
+    let mut card_text = vec![
         Line::from(vec![status_badge]),
         Line::from(""),
         Line::from(vec![
@@ -45,6 +41,16 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
             Span::styled(&state.track_album, Style::default().fg(TEXT)),
         ]),
     ];
+
+    if let PlaybackStatus::Failed(ref err) = state.playback_status {
+        card_text.push(Line::from(vec![
+            Span::styled(
+                "Error:  ",
+                Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(err.as_str(), Style::default().fg(ERROR)),
+        ]));
+    }
 
     let outer_block = Block::default()
         .borders(Borders::ALL)
@@ -73,7 +79,7 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
             ])
             .split(inner_area);
 
-        frame.render_widget(Paragraph::new(card_text), horizontal[0]);
+        frame.render_widget(Paragraph::new(card_text).wrap(Wrap { trim: true }), horizontal[0]);
 
         let cover_rect = Rect {
             x: horizontal[2].x,
@@ -84,7 +90,7 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         let image_widget = Image::new(proto);
         frame.render_widget(image_widget, cover_rect);
     } else {
-        frame.render_widget(Paragraph::new(card_text), inner_area);
+        frame.render_widget(Paragraph::new(card_text).wrap(Wrap { trim: true }), inner_area);
     }
 }
 
@@ -130,10 +136,18 @@ pub fn render_details(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         format!("{} / {} tracks", state.queue_index + 1, state.queue.len())
     };
+    let pipeline_color = if state.audio_error.is_some() {
+        ERROR
+    } else {
+        TEXT
+    };
     let text = vec![
         Line::from(vec![
             Span::styled("Audio Pipeline: ", Style::default().fg(MUTED)),
-            Span::styled("librespot -> PipeWire", Style::default().fg(TEXT)),
+            Span::styled(
+                format!("librespot -> {}", state.audio_backend_label),
+                Style::default().fg(pipeline_color),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Bitrate:        ", Style::default().fg(MUTED)),

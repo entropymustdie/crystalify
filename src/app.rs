@@ -13,6 +13,17 @@ use std::collections::HashMap;
 
 pub const COVER_WIDTH_CELLS: u16 = 12;
 pub const COVER_HEIGHT_CELLS: u16 = 6;
+pub const PLAYBACK_LOADING_TIMEOUT_MS: u32 = 10_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PlaybackStatus {
+    #[default]
+    Idle,
+    Loading,
+    Playing,
+    Paused,
+    Failed(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
@@ -30,6 +41,10 @@ pub struct AppState {
     pub duration_ms: u32,
     pub position_ms: u32,
     pub is_playing: bool,
+    pub playback_status: PlaybackStatus,
+    pub loading_elapsed_ms: u32,
+    pub audio_backend_label: String,
+    pub audio_error: Option<String>,
     pub volume: u16,
     pub username: String,
     pub device_name: String,
@@ -64,6 +79,10 @@ impl AppState {
             duration_ms: 0,
             position_ms: 0,
             is_playing: false,
+            playback_status: PlaybackStatus::Idle,
+            loading_elapsed_ms: 0,
+            audio_backend_label: "Unknown".to_string(),
+            audio_error: None,
             volume,
             username,
             device_name,
@@ -92,6 +111,36 @@ impl AppState {
         self.refresh_cover_protocol();
     }
 
+    pub fn set_audio_info(&mut self, backend_label: String, audio_error: Option<String>) {
+        self.audio_backend_label = backend_label;
+        self.audio_error = audio_error.clone();
+        if let Some(err) = audio_error {
+            self.set_playback_failed(err);
+        }
+    }
+
+    pub fn set_playback_failed(&mut self, message: impl Into<String>) {
+        let msg = message.into();
+        self.is_playing = false;
+        self.loading_elapsed_ms = 0;
+        self.playback_status = PlaybackStatus::Failed(msg.clone());
+        self.status_message = Some(msg);
+    }
+
+    pub fn current_track_metadata(&self) -> Option<TrackMetadata> {
+        if self.track_uri.is_empty() {
+            return None;
+        }
+        Some(TrackMetadata {
+            uri: self.track_uri.clone(),
+            title: self.track_title.clone(),
+            artist: self.track_artist.clone(),
+            album: self.track_album.clone(),
+            duration_ms: self.duration_ms,
+            cover_url: self.track_cover_url.clone(),
+        })
+    }
+
     pub fn set_track(&mut self, meta: TrackMetadata) {
         self.track_uri = meta.uri;
         self.track_title = meta.title;
@@ -100,7 +149,13 @@ impl AppState {
         self.track_cover_url = meta.cover_url;
         self.duration_ms = meta.duration_ms;
         self.position_ms = 0;
-        self.is_playing = true;
+        self.is_playing = false;
+        self.loading_elapsed_ms = 0;
+        if let Some(err) = self.audio_error.clone() {
+            self.set_playback_failed(err);
+        } else {
+            self.playback_status = PlaybackStatus::Loading;
+        }
         self.refresh_cover_protocol();
     }
 
@@ -263,20 +318,44 @@ impl AppState {
 
     pub fn handle_player_event(&mut self, event: PlayerEvent) {
         match event {
+            PlayerEvent::Loading { .. } => {
+                self.is_playing = false;
+                self.loading_elapsed_ms = 0;
+                if self.audio_error.is_none() {
+                    self.playback_status = PlaybackStatus::Loading;
+                }
+            }
             PlayerEvent::Playing { position_ms, .. } => {
                 self.position_ms = position_ms;
                 self.is_playing = true;
+                self.loading_elapsed_ms = 0;
+                self.playback_status = PlaybackStatus::Playing;
             }
             PlayerEvent::Paused { position_ms, .. } => {
                 self.position_ms = position_ms;
                 self.is_playing = false;
+                self.loading_elapsed_ms = 0;
+                if !matches!(self.playback_status, PlaybackStatus::Failed(_)) {
+                    self.playback_status = PlaybackStatus::Paused;
+                }
             }
             PlayerEvent::Stopped { .. } => {
                 self.is_playing = false;
+                self.loading_elapsed_ms = 0;
+                if !matches!(self.playback_status, PlaybackStatus::Failed(_)) {
+                    self.playback_status = PlaybackStatus::Idle;
+                }
             }
             PlayerEvent::EndOfTrack { .. } => {
                 self.is_playing = false;
+                self.loading_elapsed_ms = 0;
+                if !matches!(self.playback_status, PlaybackStatus::Failed(_)) {
+                    self.playback_status = PlaybackStatus::Idle;
+                }
                 self.pending_next_track = true;
+            }
+            PlayerEvent::Unavailable { .. } => {
+                self.set_playback_failed("Трек недоступний або не вдалося завантажити стрім");
             }
             PlayerEvent::PositionChanged { position_ms, .. }
             | PlayerEvent::PositionCorrection { position_ms, .. }
@@ -291,8 +370,19 @@ impl AppState {
     }
 
     pub fn tick(&mut self, delta_ms: u32) {
-        if self.is_playing && self.position_ms < self.duration_ms {
-            self.position_ms = (self.position_ms + delta_ms).min(self.duration_ms);
+        match self.playback_status {
+            PlaybackStatus::Playing => {
+                if self.position_ms < self.duration_ms {
+                    self.position_ms = (self.position_ms + delta_ms).min(self.duration_ms);
+                }
+            }
+            PlaybackStatus::Loading => {
+                self.loading_elapsed_ms = self.loading_elapsed_ms.saturating_add(delta_ms);
+                if self.loading_elapsed_ms >= PLAYBACK_LOADING_TIMEOUT_MS {
+                    self.set_playback_failed("Відтворення не почалося: перевірте аудіопристрій/мережу");
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -394,18 +484,29 @@ mod tests {
         assert_eq!(started.title, "Song Two");
         assert_eq!(state.track_title, "Song Two");
         assert_eq!(state.queue_index, 1);
+        assert!(!state.is_playing);
+        assert_eq!(state.playback_status, PlaybackStatus::Loading);
+
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+        state.handle_player_event(PlayerEvent::Playing {
+            play_request_id: 1,
+            track_id: dummy_uri.clone(),
+            position_ms: 0,
+        });
         assert!(state.is_playing);
+        assert_eq!(state.playback_status, PlaybackStatus::Playing);
 
         let next = state.next_track().expect("Should advance to index 2");
         assert_eq!(next.title, "Song Three");
         assert_eq!(state.queue_index, 2);
+        assert_eq!(state.playback_status, PlaybackStatus::Loading);
         assert!(state.next_track().is_none());
 
         let prev = state.prev_track().expect("Should go back to index 1");
         assert_eq!(prev.title, "Song Two");
         assert_eq!(state.queue_index, 1);
+        assert_eq!(state.playback_status, PlaybackStatus::Loading);
 
-        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
         state.handle_player_event(PlayerEvent::EndOfTrack {
             play_request_id: 1,
             track_id: dummy_uri,
@@ -556,7 +657,12 @@ mod tests {
         );
 
         state.start_playback_queue(sample_tracks(), 0);
-        state.position_ms = 90_000;
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+        state.handle_player_event(PlayerEvent::Playing {
+            play_request_id: 1,
+            track_id: dummy_uri,
+            position_ms: 90_000,
+        });
         terminal.draw(|f| draw_ui(f, &state)).unwrap();
         let buf = terminal.backend().buffer();
 
@@ -635,6 +741,13 @@ mod tests {
         state.prev_track();
         assert!(state.cover_image.is_some());
 
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+        state.handle_player_event(PlayerEvent::Playing {
+            play_request_id: 1,
+            track_id: dummy_uri,
+            position_ms: 0,
+        });
+
         let backend = TestBackend::new(120, 35);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw_ui(f, &state)).unwrap();
@@ -668,5 +781,224 @@ mod tests {
             let mut small_term = Terminal::new(small_backend).unwrap();
             small_term.draw(|f| draw_ui(f, &state)).unwrap();
         }
+    }
+
+    #[test]
+    fn test_playback_status_transitions_by_events() {
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 30000);
+        assert_eq!(state.playback_status, PlaybackStatus::Idle);
+        assert!(!state.is_playing);
+
+        let tracks = sample_tracks();
+        state.set_track(tracks[0].clone());
+        assert_eq!(state.playback_status, PlaybackStatus::Loading);
+        assert!(!state.is_playing);
+        assert_eq!(state.position_ms, 0);
+
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+
+        state.handle_player_event(PlayerEvent::Loading {
+            play_request_id: 1,
+            track_id: dummy_uri.clone(),
+            position_ms: 0,
+        });
+        assert_eq!(state.playback_status, PlaybackStatus::Loading);
+        assert!(!state.is_playing);
+
+        state.handle_player_event(PlayerEvent::Playing {
+            play_request_id: 1,
+            track_id: dummy_uri.clone(),
+            position_ms: 1200,
+        });
+        assert_eq!(state.playback_status, PlaybackStatus::Playing);
+        assert!(state.is_playing);
+        assert_eq!(state.position_ms, 1200);
+
+        state.handle_player_event(PlayerEvent::Paused {
+            play_request_id: 1,
+            track_id: dummy_uri.clone(),
+            position_ms: 1500,
+        });
+        assert_eq!(state.playback_status, PlaybackStatus::Paused);
+        assert!(!state.is_playing);
+        assert_eq!(state.position_ms, 1500);
+
+        state.handle_player_event(PlayerEvent::Unavailable {
+            play_request_id: 1,
+            track_id: dummy_uri.clone(),
+        });
+        assert!(matches!(state.playback_status, PlaybackStatus::Failed(_)));
+        assert!(!state.is_playing);
+        assert!(state.status_message.is_some());
+
+        state.handle_player_event(PlayerEvent::EndOfTrack {
+            play_request_id: 1,
+            track_id: dummy_uri,
+        });
+        assert!(matches!(state.playback_status, PlaybackStatus::Failed(_)));
+        assert!(state.pending_next_track);
+    }
+
+    #[test]
+    fn test_tick_only_advances_in_playing_and_times_out_in_loading() {
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 30000);
+        let tracks = sample_tracks();
+
+        state.tick(5000);
+        assert_eq!(state.position_ms, 0);
+        assert_eq!(state.playback_status, PlaybackStatus::Idle);
+
+        state.set_track(tracks[0].clone());
+        assert_eq!(state.playback_status, PlaybackStatus::Loading);
+
+        state.tick(5000);
+        assert_eq!(state.position_ms, 0);
+        assert_eq!(state.playback_status, PlaybackStatus::Loading);
+        assert_eq!(state.loading_elapsed_ms, 5000);
+
+        state.tick(5000);
+        assert_eq!(state.position_ms, 0);
+        assert!(matches!(state.playback_status, PlaybackStatus::Failed(_)));
+        assert!(!state.is_playing);
+        assert!(state.status_message.is_some());
+
+        state.tick(5000);
+        assert_eq!(state.position_ms, 0);
+
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+        state.handle_player_event(PlayerEvent::Playing {
+            play_request_id: 2,
+            track_id: dummy_uri.clone(),
+            position_ms: 1000,
+        });
+        state.tick(250);
+        assert_eq!(state.position_ms, 1250);
+
+        state.handle_player_event(PlayerEvent::Paused {
+            play_request_id: 2,
+            track_id: dummy_uri,
+            position_ms: 1250,
+        });
+        state.tick(1000);
+        assert_eq!(state.position_ms, 1250);
+    }
+
+    #[test]
+    fn test_set_audio_info_and_set_track_with_audio_error() {
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 30000);
+        state.set_audio_info(
+            "rodio (ALSA) — не знайдено".to_string(),
+            Some("Аудіопристрій не знайдено".to_string()),
+        );
+        assert_eq!(
+            state.playback_status,
+            PlaybackStatus::Failed("Аудіопристрій не знайдено".to_string())
+        );
+
+        state.set_track(sample_tracks()[0].clone());
+        assert_eq!(
+            state.playback_status,
+            PlaybackStatus::Failed("Аудіопристрій не знайдено".to_string())
+        );
+        assert!(!state.is_playing);
+    }
+
+    #[test]
+    fn test_ui_renders_all_playback_badges_error_line_and_no_pipewire() {
+        use crate::ui::draw_ui;
+        use crate::ui::theme::{ERROR, MUTED, PRIMARY, TEXT};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let backend = TestBackend::new(120, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 32768);
+        state.set_audio_info("rodio (WASAPI) — Speakers".to_string(), None);
+        state.set_track(sample_tracks()[0].clone());
+
+        terminal.draw(|f| draw_ui(f, &state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut full_text = String::new();
+        let mut found_loading = false;
+        for y in 0..buf.area.height {
+            let row_str: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            if let Some(col) = row_str.find("[LOADING]") {
+                assert_eq!(buf[(col as u16, y)].bg, TEXT);
+                found_loading = true;
+            }
+            full_text.push_str(&row_str);
+            full_text.push('\n');
+        }
+        assert!(found_loading, "Should render [LOADING] badge with TEXT bg");
+        assert!(!full_text.contains("PipeWire"));
+        assert!(full_text.contains("rodio (WASAPI) — Speakers"));
+
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+        state.handle_player_event(PlayerEvent::Playing {
+            play_request_id: 1,
+            track_id: dummy_uri.clone(),
+            position_ms: 5000,
+        });
+        terminal.draw(|f| draw_ui(f, &state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut found_playing = false;
+        for y in 0..buf.area.height {
+            let row_str: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            if let Some(col) = row_str.find("[PLAYING]") {
+                assert_eq!(buf[(col as u16, y)].bg, PRIMARY);
+                found_playing = true;
+            }
+        }
+        assert!(found_playing, "Should render [PLAYING] badge with PRIMARY bg");
+
+        state.handle_player_event(PlayerEvent::Paused {
+            play_request_id: 1,
+            track_id: dummy_uri,
+            position_ms: 5000,
+        });
+        terminal.draw(|f| draw_ui(f, &state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut found_paused = false;
+        for y in 0..buf.area.height {
+            let row_str: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            if let Some(col) = row_str.find("[PAUSED]") {
+                assert_eq!(buf[(col as u16, y)].bg, MUTED);
+                found_paused = true;
+            }
+        }
+        assert!(found_paused, "Should render [PAUSED] badge with MUTED bg");
+
+        state.set_audio_info(
+            "rodio (WASAPI) — не знайдено".to_string(),
+            Some("Аудіопристрій не знайдено".to_string()),
+        );
+        terminal.draw(|f| draw_ui(f, &state)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut full_text = String::new();
+        let mut found_error_badge = false;
+        let mut found_error_line = false;
+        for y in 0..buf.area.height {
+            let row_str: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            if let Some(col) = row_str.find("[ERROR]") {
+                assert_eq!(buf[(col as u16, y)].bg, ERROR);
+                found_error_badge = true;
+            }
+            if let Some(col) = row_str.find("Error:  Аудіопристрій не знайдено") {
+                assert_eq!(buf[(col as u16, y)].fg, ERROR);
+                found_error_line = true;
+            }
+            full_text.push_str(&row_str);
+            full_text.push('\n');
+        }
+        assert!(found_error_badge, "Should render [ERROR] badge with ERROR bg");
+        assert!(found_error_line, "Should render Error line with ERROR fg");
+        assert!(!full_text.contains("PipeWire"));
     }
 }

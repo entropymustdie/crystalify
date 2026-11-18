@@ -5,3 +5,4 @@ pub const TEXT: Color = Color::Rgb(221, 230, 246);
 pub const MUTED: Color = Color::Rgb(87, 124, 171);
 pub const BG_HIGHLIGHT: Color = Color::Rgb(45, 40, 60);
 pub const BADGE_FG: Color = Color::Rgb(20, 20, 30);
+pub const ERROR: Color = Color::Rgb(255, 107, 129);

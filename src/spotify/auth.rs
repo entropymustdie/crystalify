@@ -65,9 +65,23 @@ pub fn zeroize_string(s: &mut String) {
     s.clear();
 }
 
-pub fn resolve_cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+pub fn resolve_cache_dir_for_platform(
+    xdg_cache_home: Option<&str>,
+    local_app_data: Option<&str>,
+    user_profile: Option<&str>,
+    home: Option<&str>,
+    is_windows: bool,
+) -> Option<PathBuf> {
     if let Some(xdg) = xdg_cache_home.filter(|s| !s.trim().is_empty()) {
         return Some(PathBuf::from(xdg).join("crystalify"));
+    }
+    if is_windows {
+        if let Some(local) = local_app_data.filter(|s| !s.trim().is_empty()) {
+            return Some(PathBuf::from(local).join("crystalify"));
+        }
+        if let Some(profile) = user_profile.filter(|s| !s.trim().is_empty()) {
+            return Some(PathBuf::from(profile).join(".cache").join("crystalify"));
+        }
     }
     if let Some(h) = home.filter(|s| !s.trim().is_empty()) {
         return Some(PathBuf::from(h).join(".cache").join("crystalify"));
@@ -75,10 +89,23 @@ pub fn resolve_cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) 
     None
 }
 
+#[cfg(test)]
+pub fn resolve_cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    resolve_cache_dir_for_platform(xdg_cache_home, None, None, home, false)
+}
+
 pub fn get_cache_dir() -> Option<PathBuf> {
     let xdg = env::var("XDG_CACHE_HOME").ok();
+    let local_app_data = env::var("LOCALAPPDATA").ok();
+    let user_profile = env::var("USERPROFILE").ok();
     let home = env::var("HOME").ok();
-    resolve_cache_dir_from(xdg.as_deref(), home.as_deref())
+    resolve_cache_dir_for_platform(
+        xdg.as_deref(),
+        local_app_data.as_deref(),
+        user_profile.as_deref(),
+        home.as_deref(),
+        cfg!(windows),
+    )
 }
 
 pub fn init_cache_at(dir: &Path) -> Result<Cache, Box<dyn std::error::Error>> {
@@ -521,6 +548,58 @@ mod tests {
             Some(PathBuf::from("/home/user/.cache/crystalify"))
         );
         assert_eq!(resolve_cache_dir_from(None, None), None);
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_for_platform_windows_and_unix() {
+        assert_eq!(
+            resolve_cache_dir_for_platform(
+                Some("D:\\xdg"),
+                Some("C:\\Users\\user\\AppData\\Local"),
+                Some("C:\\Users\\user"),
+                Some("/home/user"),
+                true
+            ),
+            Some(PathBuf::from("D:\\xdg").join("crystalify"))
+        );
+        assert_eq!(
+            resolve_cache_dir_for_platform(
+                Some("   "),
+                Some("C:\\Users\\user\\AppData\\Local"),
+                Some("C:\\Users\\user"),
+                None,
+                true
+            ),
+            Some(PathBuf::from("C:\\Users\\user\\AppData\\Local").join("crystalify"))
+        );
+        assert_eq!(
+            resolve_cache_dir_for_platform(
+                None,
+                Some(""),
+                Some("C:\\Users\\user"),
+                None,
+                true
+            ),
+            Some(
+                PathBuf::from("C:\\Users\\user")
+                    .join(".cache")
+                    .join("crystalify")
+            )
+        );
+        assert_eq!(
+            resolve_cache_dir_for_platform(
+                None,
+                Some("C:\\Users\\user\\AppData\\Local"),
+                Some("C:\\Users\\user"),
+                Some("/home/user"),
+                false
+            ),
+            Some(PathBuf::from("/home/user").join(".cache").join("crystalify"))
+        );
+        assert_eq!(
+            resolve_cache_dir_for_platform(None, None, None, None, true),
+            None
+        );
     }
 
     #[test]

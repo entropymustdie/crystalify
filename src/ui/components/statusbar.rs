@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::ui::theme::{MUTED, PRIMARY, TEXT};
+use crate::ui::theme::{ERROR, MUTED, PRIMARY, TEXT};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -21,7 +21,14 @@ pub fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  |  Audio Backend: ", Style::default().fg(MUTED)),
-        Span::styled("PipeWire (ALSA)", Style::default().fg(PRIMARY)),
+        Span::styled(
+            &state.audio_backend_label,
+            Style::default().fg(if state.audio_error.is_some() {
+                ERROR
+            } else {
+                PRIMARY
+            }),
+        ),
     ])];
 
     let widget = Paragraph::new(header_text).block(

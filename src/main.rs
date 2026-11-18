@@ -2,7 +2,7 @@ mod app;
 mod spotify;
 mod ui;
 
-use app::{AppState, InputMode};
+use app::{AppState, InputMode, PlaybackStatus};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -63,6 +63,20 @@ fn spawn_cover_fetch_if_needed(
     });
 }
 
+fn load_track_with_status(
+    player: &SpotifyPlayer,
+    state: &mut AppState,
+    client: &SpotifyClient,
+    tx: &UnboundedSender<AsyncResult>,
+    track: &TrackMetadata,
+    status_message: String,
+) {
+    if state.audio_error.is_none() {
+        state.status_message = Some(status_message);
+    }
+    load_track_into_player(player, state, client, tx, track);
+}
+
 fn load_track_into_player(
     player: &SpotifyPlayer,
     state: &mut AppState,
@@ -70,11 +84,15 @@ fn load_track_into_player(
     tx: &UnboundedSender<AsyncResult>,
     track: &TrackMetadata,
 ) {
+    if state.audio_error.is_some() {
+        spawn_cover_fetch_if_needed(state, client, tx);
+        return;
+    }
     if let Ok(uri) = SpotifyUri::from_uri(&track.uri) {
         player.load(uri);
         spawn_cover_fetch_if_needed(state, client, tx);
     } else {
-        state.status_message = Some(format!("Invalid track URI: {}", track.uri));
+        state.set_playback_failed(format!("Invalid track URI: {}", track.uri));
     }
 }
 
@@ -248,17 +266,15 @@ fn handle_key_event(
                 let tracks = col.tracks.clone();
                 let idx = state.collection_selected_index;
                 if let Some(track) = state.start_playback_queue(tracks, idx) {
-                    state.status_message =
-                        Some(format!("Playing '{}' — {}", track.title, track.artist));
-                    load_track_into_player(player, state, client, tx, &track);
+                    let msg = format!("Loading '{}' — {}", track.title, track.artist);
+                    load_track_with_status(player, state, client, tx, &track, msg);
                 }
             } else if state.search_category == SearchCategory::Tracks {
                 let tracks = state.search_results.tracks.clone();
                 let idx = state.selected_index;
                 if let Some(track) = state.start_playback_queue(tracks, idx) {
-                    state.status_message =
-                        Some(format!("Playing '{}' — {}", track.title, track.artist));
-                    load_track_into_player(player, state, client, tx, &track);
+                    let msg = format!("Loading '{}' — {}", track.title, track.artist);
+                    load_track_with_status(player, state, client, tx, &track, msg);
                 }
             } else {
                 trigger_collection_load(state, client, tx, false);
@@ -269,17 +285,15 @@ fn handle_key_event(
                 let tracks = col.tracks.clone();
                 let title = col.title.clone();
                 if let Some(track) = state.start_playback_queue(tracks, 0) {
-                    state.status_message =
-                        Some(format!("Playing all from '{title}': '{}'", track.title));
-                    load_track_into_player(player, state, client, tx, &track);
+                    let msg = format!("Loading from '{title}': '{}'", track.title);
+                    load_track_with_status(player, state, client, tx, &track, msg);
                 }
             } else if state.search_category == SearchCategory::Tracks {
                 let tracks = state.search_results.tracks.clone();
                 let idx = state.selected_index;
                 if let Some(track) = state.start_playback_queue(tracks, idx) {
-                    state.status_message =
-                        Some(format!("Playing '{}' — {}", track.title, track.artist));
-                    load_track_into_player(player, state, client, tx, &track);
+                    let msg = format!("Loading '{}' — {}", track.title, track.artist);
+                    load_track_with_status(player, state, client, tx, &track, msg);
                 }
             } else {
                 trigger_collection_load(state, client, tx, true);
@@ -287,31 +301,46 @@ fn handle_key_event(
         }
         KeyCode::Char('n') => {
             if let Some(track) = state.next_track() {
-                state.status_message =
-                    Some(format!("Next track: '{}' — {}", track.title, track.artist));
-                load_track_into_player(player, state, client, tx, &track);
+                let msg = format!("Next track: '{}' — {}", track.title, track.artist);
+                load_track_with_status(player, state, client, tx, &track, msg);
             } else {
                 state.status_message = Some("End of playback queue".to_string());
             }
         }
         KeyCode::Char('b') => {
             if let Some(track) = state.prev_track() {
-                state.status_message = Some(format!(
-                    "Previous track: '{}' — {}",
-                    track.title, track.artist
-                ));
-                load_track_into_player(player, state, client, tx, &track);
+                let msg = format!("Previous track: '{}' — {}", track.title, track.artist);
+                load_track_with_status(player, state, client, tx, &track, msg);
             } else {
                 state.status_message = Some("Already at start of queue".to_string());
             }
         }
         KeyCode::Char(' ') => {
-            if state.is_playing {
-                player.pause();
-                state.is_playing = false;
-            } else if !state.track_uri.is_empty() {
-                player.play();
-                state.is_playing = true;
+            if !state.track_uri.is_empty() {
+                match state.playback_status.clone() {
+                    PlaybackStatus::Playing => {
+                        player.pause();
+                        state.playback_status = PlaybackStatus::Paused;
+                        state.is_playing = false;
+                    }
+                    PlaybackStatus::Paused | PlaybackStatus::Idle => {
+                        if let Some(err) = state.audio_error.clone() {
+                            state.set_playback_failed(err);
+                        } else {
+                            player.play();
+                            state.playback_status = PlaybackStatus::Loading;
+                            state.loading_elapsed_ms = 0;
+                        }
+                    }
+                    PlaybackStatus::Failed(_) => {
+                        if let Some(track) = state.current_track_metadata() {
+                            state.set_track(track.clone());
+                            let msg = format!("Retrying '{}' — {}", track.title, track.artist);
+                            load_track_with_status(player, state, client, tx, &track, msg);
+                        }
+                    }
+                    PlaybackStatus::Loading => {}
+                }
             }
         }
         KeyCode::Right => {
@@ -351,6 +380,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_volume = player.volume();
 
     let mut state = AppState::new(username, device_name, initial_volume);
+    state.set_audio_info(player.backend_label.clone(), player.audio_error.clone());
 
     let (async_tx, mut async_rx) = mpsc::unbounded_channel::<AsyncResult>();
 
@@ -390,13 +420,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if state.pending_next_track {
                     state.pending_next_track = false;
                     if let Some(next) = state.next_track() {
-                        state.status_message = Some(format!(
-                            "Auto-playing next: '{}' — {}",
-                            next.title, next.artist
-                        ));
-                        load_track_into_player(&player, &mut state, &client, &async_tx, &next);
+                        let msg = format!("Auto-playing next: '{}' — {}", next.title, next.artist);
+                        load_track_with_status(&player, &mut state, &client, &async_tx, &next, msg);
                     }
                 }
+            }
+            Some(err) = player.audio_errors.recv() => {
+                state.set_audio_info(player.backend_label.clone(), Some(err));
             }
             Some(async_res) = async_rx.recv() => {
                 match async_res {
@@ -438,12 +468,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.open_collection(kind, title.clone(), subtitle, tracks.clone());
                             if auto_play_all {
                                 if let Some(first) = state.start_playback_queue(tracks, 0) {
-                                    state.status_message = Some(format!(
+                                    let msg = format!(
                                         "Playing {} '{title}' — '{}'",
                                         kind.label(),
                                         first.title
-                                    ));
-                                    load_track_into_player(&player, &mut state, &client, &async_tx, &first);
+                                    );
+                                    load_track_with_status(
+                                        &player,
+                                        &mut state,
+                                        &client,
+                                        &async_tx,
+                                        &first,
+                                        msg,
+                                    );
                                 }
                             } else {
                                 state.status_message = Some(format!(

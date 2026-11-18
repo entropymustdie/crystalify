@@ -736,6 +736,7 @@ dependencies = [
 name = "crystalify"
 version = "0.1.0"
 dependencies = [
+ "cpal",
  "crossterm",
  "futures-util",
  "glam",
