@@ -371,6 +371,8 @@ fn handle_key_event(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    spotify::init_tls_provider();
+    spotify::logger::init();
     let session = authenticate().await?;
     let username = session.username();
     let device_name = "crystalify".to_string();

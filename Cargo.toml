@@ -10,10 +10,12 @@ crossterm = "0.29.0"
 futures-util = "0.3.34"
 glam = "0.33.11"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
-librespot = { git = "https://github.com/librespot-org/librespot" }
+librespot = { git = "https://github.com/librespot-org/librespot", default-features = false, features = ["rustls-tls-webpki-roots", "rodio-backend", "with-libmdns"] }
+log = "0.4"
 ratatui = "0.30.2"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm", "image-defaults"] }
-reqwest = { version = "0.13.5", features = ["json"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "charset", "http2", "system-proxy", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustfft = "6.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

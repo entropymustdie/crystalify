@@ -561,6 +561,7 @@ pub fn parse_playlist_tracks_response(json: &Value) -> Vec<TrackMetadata> {
 
 impl SpotifyClient {
     pub fn new(session: Session) -> Self {
+        crate::spotify::init_tls_provider();
         Self {
             session,
             http: Client::new(),

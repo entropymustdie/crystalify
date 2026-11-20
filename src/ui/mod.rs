@@ -46,7 +46,7 @@ pub fn draw_ui(frame: &mut Frame, state: &AppState) {
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(7),
+            Constraint::Min(9),
             Constraint::Length(3),
             Constraint::Length(8),
         ])

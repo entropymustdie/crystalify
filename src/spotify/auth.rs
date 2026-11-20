@@ -313,17 +313,30 @@ fn prompt_auth_method() -> Result<AuthMethod, Box<dyn std::error::Error>> {
     }
 }
 
+pub async fn wait_for_session_country(session: &Session) {
+    for _ in 0..40 {
+        if !session.country().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 async fn connect_session(
     credentials: Credentials,
     cache: Option<Cache>,
 ) -> Result<Session, Box<dyn std::error::Error>> {
+    crate::spotify::init_tls_provider();
     let session_config = SessionConfig::default();
+    let _ = fs::create_dir_all(&session_config.tmp_dir);
     let session = Session::new(session_config, cache);
     session.connect(credentials, true).await?;
+    wait_for_session_country(&session).await;
     Ok(session)
 }
 
 pub async fn authenticate() -> Result<Session, Box<dyn std::error::Error>> {
+    crate::spotify::init_tls_provider();
     let cache = init_cache();
 
     let mut env_token = env::var("SPOTIFY_ACCESS_TOKEN").unwrap_or_default();

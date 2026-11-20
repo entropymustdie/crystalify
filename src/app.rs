@@ -11,8 +11,8 @@ use ratatui_image::{
 };
 use std::collections::HashMap;
 
-pub const COVER_WIDTH_CELLS: u16 = 12;
-pub const COVER_HEIGHT_CELLS: u16 = 6;
+pub const COVER_WIDTH_CELLS: u16 = 10;
+pub const COVER_HEIGHT_CELLS: u16 = 5;
 pub const PLAYBACK_LOADING_TIMEOUT_MS: u32 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -355,7 +355,13 @@ impl AppState {
                 self.pending_next_track = true;
             }
             PlayerEvent::Unavailable { .. } => {
-                self.set_playback_failed("Трек недоступний або не вдалося завантажити стрім");
+                let msg = match crate::spotify::logger::take_last_error() {
+                    Some(detail) if !detail.trim().is_empty() => {
+                        format!("Failed to load stream: {detail}")
+                    }
+                    _ => "Track unavailable or failed to load stream".to_string(),
+                };
+                self.set_playback_failed(msg);
             }
             PlayerEvent::PositionChanged { position_ms, .. }
             | PlayerEvent::PositionCorrection { position_ms, .. }
@@ -379,7 +385,7 @@ impl AppState {
             PlaybackStatus::Loading => {
                 self.loading_elapsed_ms = self.loading_elapsed_ms.saturating_add(delta_ms);
                 if self.loading_elapsed_ms >= PLAYBACK_LOADING_TIMEOUT_MS {
-                    self.set_playback_failed("Відтворення не почалося: перевірте аудіопристрій/мережу");
+                    self.set_playback_failed("Playback did not start: check audio device or network");
                 }
             }
             _ => {}
@@ -887,18 +893,18 @@ mod tests {
     fn test_set_audio_info_and_set_track_with_audio_error() {
         let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 30000);
         state.set_audio_info(
-            "rodio (ALSA) — не знайдено".to_string(),
-            Some("Аудіопристрій не знайдено".to_string()),
+            "rodio (ALSA) — not found".to_string(),
+            Some("Audio output device not found".to_string()),
         );
         assert_eq!(
             state.playback_status,
-            PlaybackStatus::Failed("Аудіопристрій не знайдено".to_string())
+            PlaybackStatus::Failed("Audio output device not found".to_string())
         );
 
         state.set_track(sample_tracks()[0].clone());
         assert_eq!(
             state.playback_status,
-            PlaybackStatus::Failed("Аудіопристрій не знайдено".to_string())
+            PlaybackStatus::Failed("Audio output device not found".to_string())
         );
         assert!(!state.is_playing);
     }
@@ -974,8 +980,8 @@ mod tests {
         assert!(found_paused, "Should render [PAUSED] badge with MUTED bg");
 
         state.set_audio_info(
-            "rodio (WASAPI) — не знайдено".to_string(),
-            Some("Аудіопристрій не знайдено".to_string()),
+            "rodio (WASAPI) — not found".to_string(),
+            Some("Audio output device not found".to_string()),
         );
         terminal.draw(|f| draw_ui(f, &state)).unwrap();
         let buf = terminal.backend().buffer();
@@ -990,7 +996,7 @@ mod tests {
                 assert_eq!(buf[(col as u16, y)].bg, ERROR);
                 found_error_badge = true;
             }
-            if let Some(col) = row_str.find("Error:  Аудіопристрій не знайдено") {
+            if let Some(col) = row_str.find("Error:  Audio output device") {
                 assert_eq!(buf[(col as u16, y)].fg, ERROR);
                 found_error_line = true;
             }
@@ -999,6 +1005,104 @@ mod tests {
         }
         assert!(found_error_badge, "Should render [ERROR] badge with ERROR bg");
         assert!(found_error_line, "Should render Error line with ERROR fg");
+        assert!(full_text.contains("not found"));
         assert!(!full_text.contains("PipeWire"));
+    }
+
+    #[test]
+    fn test_unavailable_uses_english_fallback_and_timeout_is_english() {
+        crate::spotify::logger::clear_last_error();
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 30000);
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+
+        state.handle_player_event(PlayerEvent::Unavailable {
+            play_request_id: 1,
+            track_id: dummy_uri,
+        });
+        assert_eq!(
+            state.playback_status,
+            PlaybackStatus::Failed("Track unavailable or failed to load stream".to_string())
+        );
+
+        state.set_track(sample_tracks()[0].clone());
+        state.tick(PLAYBACK_LOADING_TIMEOUT_MS);
+        assert_eq!(
+            state.playback_status,
+            PlaybackStatus::Failed(
+                "Playback did not start: check audio device or network".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_cover_layout_padding_alignment_and_error_below() {
+        use crate::ui::components::player::render_now_playing;
+        use image::{DynamicImage, Rgba, RgbaImage};
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
+
+        assert_eq!(COVER_WIDTH_CELLS, 10);
+        assert_eq!(COVER_HEIGHT_CELLS, 5);
+
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 32768);
+        let tracks = sample_tracks();
+        let cover_url = tracks[0].cover_url.clone().unwrap();
+        state.start_playback_queue(tracks, 0);
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(64, 64, Rgba([236, 153, 255, 255])));
+        state.cache_and_apply_cover(cover_url, img);
+        state.set_playback_failed("Stream error detail");
+
+        let area = Rect::new(0, 0, 48, 11);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_now_playing(f, &state, area)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        for x in 1..(area.width - 1) {
+            assert_eq!(buf[(x, 1)].symbol(), " ");
+        }
+
+        let mut badge_y = None;
+        let mut album_y = None;
+        let mut error_y = None;
+        let mut cover_min_x = u16::MAX;
+        let mut cover_max_x = 0u16;
+        let mut cover_min_y = u16::MAX;
+        let mut cover_max_y = 0u16;
+
+        for y in 1..(area.height - 1) {
+            let row_str: String = (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            if row_str.contains("[ERROR]") {
+                badge_y = Some(y);
+            }
+            if row_str.contains("Album:  Album X") {
+                album_y = Some(y);
+            }
+            if row_str.contains("Error:  Stream error detail") {
+                error_y = Some(y);
+            }
+            for x in 25..(area.width - 1) {
+                let sym = buf[(x, y)].symbol();
+                if sym == "▀" || sym == "▄" || sym == "█" || buf[(x, y)].bg != Color::Reset {
+                    cover_min_x = cover_min_x.min(x);
+                    cover_max_x = cover_max_x.max(x);
+                    cover_min_y = cover_min_y.min(y);
+                    cover_max_y = cover_max_y.max(y);
+                }
+            }
+        }
+
+        let badge_y = badge_y.expect("badge must render");
+        let album_y = album_y.expect("album line must render");
+        let error_y = error_y.expect("error line must render");
+
+        assert_eq!(badge_y, 2);
+        assert_eq!(cover_min_y, badge_y);
+        assert!(cover_max_y <= album_y);
+        assert!(cover_max_x <= area.width - 4);
+        assert!(cover_min_x >= 30);
+        assert!(error_y > album_y);
+        assert!(error_y > cover_max_y);
     }
 }

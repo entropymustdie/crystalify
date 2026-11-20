@@ -22,7 +22,7 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let mut card_text = vec![
+    let card_text = vec![
         Line::from(vec![status_badge]),
         Line::from(""),
         Line::from(vec![
@@ -42,16 +42,6 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         ]),
     ];
 
-    if let PlaybackStatus::Failed(ref err) = state.playback_status {
-        card_text.push(Line::from(vec![
-            Span::styled(
-                "Error:  ",
-                Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(err.as_str(), Style::default().fg(ERROR)),
-        ]));
-    }
-
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -66,20 +56,56 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
-    let can_fit_cover =
-        inner_area.width >= COVER_WIDTH_CELLS + 14 && inner_area.height >= COVER_HEIGHT_CELLS;
+    let pad_top: u16 = if inner_area.height >= 7 { 1 } else { 0 };
+    let pad_left: u16 = if inner_area.width >= 30 {
+        2
+    } else if inner_area.width > 2 {
+        1
+    } else {
+        0
+    };
+    let pad_right: u16 = if inner_area.width >= COVER_WIDTH_CELLS + 18 {
+        2
+    } else if inner_area.width > 2 {
+        1
+    } else {
+        0
+    };
+
+    let padded_area = Rect {
+        x: inner_area.x.saturating_add(pad_left),
+        y: inner_area.y.saturating_add(pad_top),
+        width: inner_area.width.saturating_sub(pad_left + pad_right),
+        height: inner_area.height.saturating_sub(pad_top),
+    };
+
+    if padded_area.width == 0 || padded_area.height == 0 {
+        return;
+    }
+
+    let header_height = COVER_HEIGHT_CELLS.min(padded_area.height);
+    let top_area = Rect {
+        x: padded_area.x,
+        y: padded_area.y,
+        width: padded_area.width,
+        height: header_height,
+    };
+
+    let cover_gap: u16 = 2;
+    let can_fit_cover = padded_area.width >= COVER_WIDTH_CELLS + cover_gap + 10
+        && top_area.height >= COVER_HEIGHT_CELLS;
 
     if can_fit_cover && let Some(ref proto) = state.cover_image {
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(10),
-                Constraint::Length(1),
+                Constraint::Length(cover_gap),
                 Constraint::Length(COVER_WIDTH_CELLS),
             ])
-            .split(inner_area);
+            .split(top_area);
 
-        frame.render_widget(Paragraph::new(card_text).wrap(Wrap { trim: true }), horizontal[0]);
+        frame.render_widget(Paragraph::new(card_text), horizontal[0]);
 
         let cover_rect = Rect {
             x: horizontal[2].x,
@@ -90,7 +116,30 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
         let image_widget = Image::new(proto);
         frame.render_widget(image_widget, cover_rect);
     } else {
-        frame.render_widget(Paragraph::new(card_text).wrap(Wrap { trim: true }), inner_area);
+        frame.render_widget(Paragraph::new(card_text), top_area);
+    }
+
+    if let PlaybackStatus::Failed(ref err) = state.playback_status
+        && padded_area.height > header_height
+    {
+        let remaining = padded_area.height - header_height;
+        let error_offset = if remaining >= 2 { 1 } else { 0 };
+        let error_area = Rect {
+            x: padded_area.x,
+            y: padded_area.y.saturating_add(header_height + error_offset),
+            width: padded_area.width,
+            height: remaining.saturating_sub(error_offset),
+        };
+        if error_area.height > 0 {
+            let error_line = Line::from(vec![
+                Span::styled(
+                    "Error:  ",
+                    Style::default().fg(ERROR).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(err.as_str(), Style::default().fg(ERROR)),
+            ]);
+            frame.render_widget(Paragraph::new(error_line).wrap(Wrap { trim: true }), error_area);
+        }
     }
 }
 

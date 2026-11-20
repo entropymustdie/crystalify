@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-const AUDIO_DEVICE_NOT_FOUND: &str = "Аудіопристрій не знайдено";
+const AUDIO_DEVICE_NOT_FOUND: &str = "Audio output device not found";
 
 struct FailingSink {
     reason: String,
@@ -43,7 +43,7 @@ pub fn detect_audio_output() -> (String, Option<String>) {
                 (format!("rodio ({host_name}) — {dev_name}"), None)
             }
             None => (
-                format!("rodio ({host_name}) — не знайдено"),
+                format!("rodio ({host_name}) — not found"),
                 Some(AUDIO_DEVICE_NOT_FOUND.to_string()),
             ),
         }
@@ -52,7 +52,7 @@ pub fn detect_audio_output() -> (String, Option<String>) {
     match result {
         Ok(info) => info,
         Err(_) => (
-            "rodio — не знайдено".to_string(),
+            "rodio — not found".to_string(),
             Some(AUDIO_DEVICE_NOT_FOUND.to_string()),
         ),
     }
@@ -71,6 +71,7 @@ pub struct SpotifyPlayer {
 
 impl SpotifyPlayer {
     pub fn new(session: Session) -> Result<Self, Box<dyn std::error::Error>> {
+        crate::spotify::init_tls_provider();
         let mixer = SoftMixer::open(MixerConfig::default())?;
         let initial_volume = 45000;
         mixer.set_volume(initial_volume);
@@ -166,6 +167,7 @@ impl SpotifyPlayer {
     }
 
     pub fn load(&self, uri: SpotifyUri) {
+        crate::spotify::logger::clear_last_error();
         if let Some(ref player) = self.player {
             player.load(uri, true, 0);
         }
@@ -228,10 +230,21 @@ mod tests {
         use crate::spotify::client::SpotifyClient;
         use librespot::core::config::SessionConfig;
 
+        crate::spotify::logger::init();
         let cache = init_cache().expect("cache");
         let creds = cache.credentials().expect("cached creds");
-        let session = Session::new(SessionConfig::default(), Some(cache));
+        let session_config = SessionConfig::default();
+        let _ = std::fs::create_dir_all(&session_config.tmp_dir);
+        let session = Session::new(session_config, Some(cache));
         session.connect(creds, true).await.expect("connect");
+
+        for _ in 0..40 {
+            if !session.country().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        println!("Session country: '{}'", session.country());
 
         let client = SpotifyClient::new(session.clone());
         let results = client.search("Tool").await.expect("live search should succeed");
@@ -252,7 +265,7 @@ mod tests {
         let uri = SpotifyUri::from_uri(&track.uri).expect("valid track uri");
         player.load(uri);
 
-        let deadline = tokio::time::sleep(Duration::from_secs(10));
+        let deadline = tokio::time::sleep(Duration::from_secs(15));
         tokio::pin!(deadline);
 
         loop {
@@ -269,10 +282,8 @@ mod tests {
                         return;
                     }
                     if let PlaybackStatus::Failed(ref err) = state.playback_status {
-                        println!("Playback failed cleanly without panic: {}", err);
-                        assert!(!state.is_playing);
                         player.stop();
-                        return;
+                        panic!("Playback failed unexpectedly with audio device '{}': {}", player.backend_label, err);
                     }
                 }
                 Some(err) = player.audio_errors.recv() => {
