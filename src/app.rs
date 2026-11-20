@@ -1,5 +1,5 @@
 use crate::spotify::models::{
-    CollectionKind, CollectionView, SearchCategory, SearchResults, TrackMetadata,
+    CollectionKind, CollectionView, SearchCategory, SearchResults, TrackLyrics, TrackMetadata,
 };
 use image::DynamicImage;
 use librespot::playback::player::PlayerEvent;
@@ -53,6 +53,11 @@ pub struct AppState {
     pub cover_image: Option<Protocol>,
     pub cover_cache: HashMap<String, DynamicImage>,
 
+    pub lyrics: TrackLyrics,
+    pub lyrics_cache: HashMap<String, TrackLyrics>,
+    pub lyrics_manual_index: usize,
+    pub lyrics_gradient_phase: f32,
+
     pub input_mode: InputMode,
     pub search_query: String,
     pub is_loading: bool,
@@ -89,6 +94,10 @@ impl AppState {
             picker: Picker::halfblocks(),
             cover_image: None,
             cover_cache: HashMap::new(),
+            lyrics: TrackLyrics::Empty,
+            lyrics_cache: HashMap::new(),
+            lyrics_manual_index: 0,
+            lyrics_gradient_phase: 0.0,
             input_mode: InputMode::Normal,
             search_query: String::new(),
             is_loading: false,
@@ -156,7 +165,79 @@ impl AppState {
         } else {
             self.playback_status = PlaybackStatus::Loading;
         }
+        self.lyrics_manual_index = 0;
+        if let Some(cached) = self.lyrics_cache.get(&self.track_uri).cloned() {
+            self.lyrics = cached;
+        } else {
+            self.lyrics = TrackLyrics::Loading;
+        }
         self.refresh_cover_protocol();
+    }
+
+    pub fn cache_and_apply_lyrics(&mut self, uri: String, lyrics: TrackLyrics) {
+        self.lyrics_cache.insert(uri.clone(), lyrics.clone());
+        if self.track_uri == uri {
+            self.lyrics_manual_index = 0;
+            self.lyrics = lyrics;
+        }
+    }
+
+    pub fn active_synced_lyric_index(&self) -> Option<usize> {
+        let TrackLyrics::Synced(ref lines) = self.lyrics else {
+            return None;
+        };
+        if lines.is_empty() {
+            return None;
+        }
+        let idx = lines.partition_point(|l| l.time_ms <= self.position_ms);
+        if idx == 0 {
+            None
+        } else {
+            Some(idx - 1)
+        }
+    }
+
+    pub fn current_lyric_display(&self) -> (String, bool) {
+        match &self.lyrics {
+            TrackLyrics::Synced(lines) => {
+                if lines.is_empty() {
+                    ("No lyrics available".to_string(), false)
+                } else if let Some(idx) = self.active_synced_lyric_index() {
+                    (lines[idx].text.clone(), true)
+                } else {
+                    ("♪".to_string(), true)
+                }
+            }
+            TrackLyrics::Unsynced(lines) => {
+                if lines.is_empty() {
+                    ("No lyrics available".to_string(), false)
+                } else {
+                    let idx = self.lyrics_manual_index.min(lines.len() - 1);
+                    (lines[idx].clone(), true)
+                }
+            }
+            TrackLyrics::Instrumental => ("♪ Instrumental ♪".to_string(), true),
+            TrackLyrics::Loading => ("Loading lyrics...".to_string(), false),
+            TrackLyrics::Unavailable => ("No lyrics available".to_string(), false),
+            TrackLyrics::Empty => (String::new(), false),
+        }
+    }
+
+    pub fn scroll_lyrics_up(&mut self) {
+        if let TrackLyrics::Unsynced(ref lines) = self.lyrics
+            && !lines.is_empty()
+        {
+            let clamped = self.lyrics_manual_index.min(lines.len() - 1);
+            self.lyrics_manual_index = clamped.saturating_sub(1);
+        }
+    }
+
+    pub fn scroll_lyrics_down(&mut self) {
+        if let TrackLyrics::Unsynced(ref lines) = self.lyrics
+            && !lines.is_empty()
+        {
+            self.lyrics_manual_index = (self.lyrics_manual_index + 1).min(lines.len() - 1);
+        }
     }
 
     pub fn cache_and_apply_cover(&mut self, url: String, img: DynamicImage) {
@@ -376,6 +457,8 @@ impl AppState {
     }
 
     pub fn tick(&mut self, delta_ms: u32) {
+        self.lyrics_gradient_phase =
+            (self.lyrics_gradient_phase + delta_ms as f32 * 0.00035).rem_euclid(1.0);
         match self.playback_status {
             PlaybackStatus::Playing => {
                 if self.position_ms < self.duration_ms {
@@ -772,8 +855,8 @@ mod tests {
         assert!(full_text.contains("Album:  Album X"));
 
         let mut has_halfblock_in_top_right_of_now_playing = false;
-        for y in 5..11 {
-            for x in 27..41 {
+        for y in 5..12 {
+            for x in 35..53 {
                 let sym = buf[(x, y)].symbol();
                 if sym == "▀" || sym == "▄" || sym == "█" || buf[(x, y)].bg != ratatui::style::Color::Reset {
                     has_halfblock_in_top_right_of_now_playing = true;
@@ -1051,7 +1134,7 @@ mod tests {
         state.cache_and_apply_cover(cover_url, img);
         state.set_playback_failed("Stream error detail");
 
-        let area = Rect::new(0, 0, 48, 11);
+        let area = Rect::new(0, 0, 52, 16);
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| render_now_playing(f, &state, area)).unwrap();
@@ -1082,7 +1165,7 @@ mod tests {
             if row_str.contains("Error:  Stream error detail") {
                 error_y = Some(y);
             }
-            for x in 25..(area.width - 1) {
+            for x in 30..(area.width - 1) {
                 let sym = buf[(x, y)].symbol();
                 if sym == "▀" || sym == "▄" || sym == "█" || buf[(x, y)].bg != Color::Reset {
                     cover_min_x = cover_min_x.min(x);
@@ -1101,8 +1184,165 @@ mod tests {
         assert_eq!(cover_min_y, badge_y);
         assert!(cover_max_y <= album_y);
         assert!(cover_max_x <= area.width - 4);
-        assert!(cover_min_x >= 30);
+        assert!(cover_min_x >= 35);
         assert!(error_y > album_y);
         assert!(error_y > cover_max_y);
+    }
+
+    #[test]
+    fn test_lyrics_synced_selection_unsynced_scroll_and_cache() {
+        use crate::spotify::models::SyncedLyricLine;
+
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 30000);
+        let tracks = sample_tracks();
+        state.set_track(tracks[0].clone());
+        assert_eq!(state.lyrics, TrackLyrics::Loading);
+        assert_eq!(
+            state.current_lyric_display(),
+            ("Loading lyrics...".to_string(), false)
+        );
+
+        let synced = TrackLyrics::Synced(vec![
+            SyncedLyricLine {
+                time_ms: 5_000,
+                text: "First verse".to_string(),
+            },
+            SyncedLyricLine {
+                time_ms: 15_000,
+                text: "Second verse".to_string(),
+            },
+        ]);
+        state.cache_and_apply_lyrics(tracks[0].uri.clone(), synced.clone());
+        assert_eq!(state.active_synced_lyric_index(), None);
+        assert_eq!(state.current_lyric_display(), ("♪".to_string(), true));
+
+        state.position_ms = 5_000;
+        assert_eq!(state.active_synced_lyric_index(), Some(0));
+        assert_eq!(
+            state.current_lyric_display(),
+            ("First verse".to_string(), true)
+        );
+
+        state.position_ms = 18_000;
+        assert_eq!(state.active_synced_lyric_index(), Some(1));
+        assert_eq!(
+            state.current_lyric_display(),
+            ("Second verse".to_string(), true)
+        );
+
+        state.set_track(tracks[1].clone());
+        assert_eq!(state.lyrics, TrackLyrics::Loading);
+        state.cache_and_apply_lyrics(
+            tracks[1].uri.clone(),
+            TrackLyrics::Unsynced(vec![
+                "Line 1".to_string(),
+                "Line 2".to_string(),
+                "Line 3".to_string(),
+            ]),
+        );
+        assert_eq!(state.current_lyric_display(), ("Line 1".to_string(), true));
+        state.scroll_lyrics_up();
+        assert_eq!(state.lyrics_manual_index, 0);
+        state.scroll_lyrics_down();
+        assert_eq!(state.lyrics_manual_index, 1);
+        assert_eq!(state.current_lyric_display(), ("Line 2".to_string(), true));
+        state.scroll_lyrics_down();
+        state.scroll_lyrics_down();
+        assert_eq!(state.lyrics_manual_index, 2);
+        assert_eq!(state.current_lyric_display(), ("Line 3".to_string(), true));
+
+        state.set_track(tracks[0].clone());
+        assert_eq!(state.lyrics, synced);
+    }
+
+    #[test]
+    fn test_ui_lyrics_panel_single_line_gradient_animation_and_45_55_split() {
+        use crate::spotify::models::SyncedLyricLine;
+        use crate::ui::draw_ui;
+        use ratatui::{Terminal, backend::TestBackend, style::Color};
+        use std::collections::HashSet;
+
+        let mut state = AppState::new("tester".to_string(), "crystalify".to_string(), 32768);
+        let tracks = sample_tracks();
+        state.start_playback_queue(tracks.clone(), 0);
+        let dummy_uri = SpotifyUri::from_uri("spotify:track:7tvuLLroI0n6uYBWuFig5d").unwrap();
+        state.handle_player_event(PlayerEvent::Playing {
+            play_request_id: 1,
+            track_id: dummy_uri,
+            position_ms: 10_000,
+        });
+        state.cache_and_apply_lyrics(
+            tracks[0].uri.clone(),
+            TrackLyrics::Synced(vec![SyncedLyricLine {
+                time_ms: 5_000,
+                text: "I know the pieces fit".to_string(),
+            }]),
+        );
+
+        let backend = TestBackend::new(140, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_ui(f, &state)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let mut lyrics_title_y = None;
+        let mut lyric_text_y = None;
+        let mut lyric_start_x = None;
+        let mut search_border_x = None;
+        let mut full_text = String::new();
+
+        for y in 0..buf.area.height {
+            let row_str: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            if row_str.contains("Lyrics [Synced]") {
+                lyrics_title_y = Some(y);
+            }
+            if let Some(byte_col) = row_str.find("I know the pieces fit") {
+                lyric_text_y = Some(y);
+                lyric_start_x = Some(row_str[..byte_col].chars().count() as u16);
+            }
+            if y == 4 {
+                for x in 55..buf.area.width {
+                    if buf[(x, y)].symbol() == "╭" {
+                        search_border_x = Some(x);
+                        break;
+                    }
+                }
+            }
+            full_text.push_str(&row_str);
+            full_text.push('\n');
+        }
+
+        let lyrics_title_y = lyrics_title_y.expect("Lyrics [Synced] sub-panel must render");
+        let lyric_text_y = lyric_text_y.expect("Lyric text must render in single line");
+        let lyric_start_x = lyric_start_x.expect("Lyric start x must be found");
+        let search_border_x = search_border_x.expect("Search panel must render");
+
+        assert!((60..=66).contains(&search_border_x));
+        assert_eq!(lyric_text_y, lyrics_title_y + 1);
+        assert!(full_text.contains("[w/s] Lyrics"));
+
+        let initial_colors: Vec<Color> = (0..21u16)
+            .map(|offset| buf[(lyric_start_x + offset, lyric_text_y)].fg)
+            .collect();
+        let unique_colors: HashSet<Color> = initial_colors.iter().copied().collect();
+        assert!(unique_colors.len() >= 5);
+        assert!(initial_colors.iter().all(|c| matches!(c, Color::Rgb(_, _, _))));
+
+        for _ in 0..10 {
+            state.tick(30);
+        }
+        terminal.draw(|f| draw_ui(f, &state)).unwrap();
+        let buf_after = terminal.backend().buffer();
+        let updated_colors: Vec<Color> = (0..21u16)
+            .map(|offset| buf_after[(lyric_start_x + offset, lyric_text_y)].fg)
+            .collect();
+        assert_ne!(initial_colors, updated_colors);
+
+        for (w, h) in [(30, 12), (18, 8), (10, 5)] {
+            let small_backend = TestBackend::new(w, h);
+            let mut small_term = Terminal::new(small_backend).unwrap();
+            small_term.draw(|f| draw_ui(f, &state)).unwrap();
+        }
     }
 }

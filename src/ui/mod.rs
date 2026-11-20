@@ -38,15 +38,15 @@ pub fn draw_ui(frame: &mut Frame, state: &AppState) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(35),
-            Constraint::Percentage(65),
+            Constraint::Percentage(45),
+            Constraint::Percentage(55),
         ])
         .split(chunks[1]);
 
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(9),
+            Constraint::Min(11),
             Constraint::Length(3),
             Constraint::Length(8),
         ])

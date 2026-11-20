@@ -104,3 +104,20 @@ pub struct CollectionView {
     pub subtitle: String,
     pub tracks: Vec<TrackMetadata>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncedLyricLine {
+    pub time_ms: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TrackLyrics {
+    #[default]
+    Empty,
+    Loading,
+    Instrumental,
+    Synced(Vec<SyncedLyricLine>),
+    Unsynced(Vec<String>),
+    Unavailable,
+}

@@ -10,9 +10,9 @@ A modern, high-performance headless Spotify CLI and TUI client written in Rust f
 - **Flexible Authentication**: Supports Browser / Google OAuth 2.0 (PKCE) out of the box, Spotify Connect Discovery, and masked username/password login with memory zeroization, plus local credential caching on Linux, macOS, and Windows.
 - **Search & Queue Playback**: Search across Tracks, Albums, Artists, and Playlists; play a single track or an entire album/artist/playlist collection with queue navigation and automatic next-track playback.
 - **Inline Terminal Album Artwork**: Cover art rendered in the `Now Playing` panel via `ratatui-image` (Kitty graphics protocol, Sixel, and Unicode halfblock fallback).
+- **Synchronized Lyrics**: Real-time LRC timestamped lyrics and unsynced lyrics via LRCLIB (`lrclib.net`), rendered in a single-line `Lyrics` bar with an animated flowing purple → blue → cyan gradient and manual scrolling (`w` / `s` or `[` / `]`).
 - **Custom TUI Theme**: Clean pastel dark palette with responsive layout across terminal sizes.
 - **Real-Time 3D Audio Visualizer (In Progress)**: Audio stream FFT analysis projected into dynamic 3D terminal meshes.
-- **Synchronized Lyrics (In Progress)**: Real-time scrolling lyrics synchronized with playback timestamps.
 - **Full Spotify Connect Remote Control / Spirc (In Progress)**: Controlling playback remotely from other Spotify clients.
 
 ---
@@ -30,6 +30,7 @@ A modern, high-performance headless Spotify CLI and TUI client written in Rust f
 | `Space` | Pause / resume playback (or retry loading track when in `[ERROR]` state) |
 | `Left` / `Right` | Seek backward / forward by 5 seconds |
 | `+` / `=` / `-` | Increase / decrease volume |
+| `w` / `s` or `[` / `]` | Scroll unsynced lyrics up / down |
 | `Backspace` | Return from an opened collection to search results |
 | `q` / `Esc` | Close opened collection (`Esc`) or quit |
 
@@ -112,7 +113,30 @@ src/
 
 ## Installation
 
-### Clone the Repository
+### Download Pre-built Binaries
+
+Pre-built binaries for **Windows (`x86_64`)** and **Linux (`x86_64` AppImage & tarball)** are automatically built by GitHub Actions on every release and `main` commit:
+
+- **[Download from GitHub Releases](https://github.com/entropymustdie/crystalify/releases)**
+
+#### Windows (`.exe`)
+Download `crystalify-windows-x86_64.exe` from the latest release and run it in **Windows Terminal**:
+```powershell
+.\crystalify-windows-x86_64.exe
+```
+
+#### Linux (`.AppImage` or `.tar.gz`)
+Download `crystalify-linux-x86_64.AppImage`, make it executable, and run it:
+```bash
+chmod +x crystalify-linux-x86_64.AppImage
+./crystalify-linux-x86_64.AppImage
+```
+
+---
+
+### Build from Source
+
+#### Clone the Repository
 
 ```bash
 git clone https://github.com/entropymustdie/crystalify.git

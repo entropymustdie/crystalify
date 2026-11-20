@@ -14,7 +14,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use ratatui_image::picker::Picker;
 use spotify::auth::authenticate;
 use spotify::client::SpotifyClient;
-use spotify::models::{CollectionKind, SearchCategory, SearchResults, TrackMetadata};
+use spotify::models::{CollectionKind, SearchCategory, SearchResults, TrackLyrics, TrackMetadata};
 use spotify::player::SpotifyPlayer;
 use std::env;
 use std::io::stdout;
@@ -35,6 +35,34 @@ enum AsyncResult {
         url: String,
         image: DynamicImage,
     },
+    LyricsLoaded {
+        uri: String,
+        lyrics: TrackLyrics,
+    },
+}
+
+fn spawn_lyrics_fetch_if_needed(
+    state: &AppState,
+    client: &SpotifyClient,
+    tx: &UnboundedSender<AsyncResult>,
+    track: &TrackMetadata,
+) {
+    if track.uri.is_empty() || state.lyrics_cache.contains_key(&track.uri) {
+        return;
+    }
+    let uri = track.uri.clone();
+    let title = track.title.clone();
+    let artist = track.artist.clone();
+    let album = track.album.clone();
+    let duration_ms = track.duration_ms;
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    tokio::spawn(async move {
+        let lyrics = client_clone
+            .fetch_lyrics(&title, &artist, &album, duration_ms)
+            .await;
+        let _ = tx_clone.send(AsyncResult::LyricsLoaded { uri, lyrics });
+    });
 }
 
 fn spawn_cover_fetch_if_needed(
@@ -84,6 +112,7 @@ fn load_track_into_player(
     tx: &UnboundedSender<AsyncResult>,
     track: &TrackMetadata,
 ) {
+    spawn_lyrics_fetch_if_needed(state, client, tx, track);
     if state.audio_error.is_some() {
         spawn_cover_fetch_if_needed(state, client, tx);
         return;
@@ -363,6 +392,12 @@ fn handle_key_event(
             player.set_volume(new_vol);
             state.volume = new_vol;
         }
+        KeyCode::Char('w') | KeyCode::Char('[') => {
+            state.scroll_lyrics_up();
+        }
+        KeyCode::Char('s') | KeyCode::Char(']') => {
+            state.scroll_lyrics_down();
+        }
         _ => {}
     }
 
@@ -434,6 +469,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match async_res {
                     AsyncResult::CoverLoaded { url, image } => {
                         state.cache_and_apply_cover(url, image);
+                    }
+                    AsyncResult::LyricsLoaded { uri, lyrics } => {
+                        state.cache_and_apply_lyrics(uri, lyrics);
                     }
                     AsyncResult::SearchCompleted(Ok(results)) => {
                         state.is_loading = false;

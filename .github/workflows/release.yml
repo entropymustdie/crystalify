@@ -1,0 +1,167 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Windows release binary
+        run: cargo build --release --locked
+
+      - name: Prepare Windows artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\crystalify.exe dist\crystalify-windows-x86_64.exe
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crystalify-windows
+          path: dist/crystalify-windows-x86_64.exe
+
+  build-linux:
+    name: Build Linux AppImage & Tarball (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config file wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Linux release binary
+        run: cargo build --release --locked
+
+      - name: Package Tarball and AppImage
+        run: |
+          mkdir -p dist AppDir/usr/bin
+          cp target/release/crystalify AppDir/usr/bin/crystalify
+          chmod +x AppDir/usr/bin/crystalify
+          strip AppDir/usr/bin/crystalify
+
+          tar -czf dist/crystalify-linux-x86_64.tar.gz -C AppDir/usr/bin crystalify
+
+          cat << 'EOF' > AppDir/AppRun
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/crystalify" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          cat << 'EOF' > AppDir/crystalify.desktop
+          [Desktop Entry]
+          Type=Application
+          Name=Crystalify
+          Comment=Spotify Terminal Player
+          Exec=crystalify
+          Icon=crystalify
+          Terminal=true
+          Categories=AudioVideo;Audio;Music;Player;
+          EOF
+
+          cat << 'EOF' > AppDir/crystalify.svg
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+            <rect width="256" height="256" rx="48" fill="#14141E"/>
+            <polygon points="128,24 220,96 184,224 72,224 36,96" fill="#577CAB" opacity="0.35"/>
+            <polygon points="128,36 204,100 172,212 84,212 52,100" fill="none" stroke="#EC99FF" stroke-width="10" stroke-linejoin="round"/>
+            <polygon points="128,36 168,116 128,212 88,116" fill="#EC99FF" opacity="0.28"/>
+            <polyline points="52,100 128,124 204,100" fill="none" stroke="#DDE6F6" stroke-width="6" stroke-linejoin="round"/>
+            <line x1="128" y1="36" x2="128" y2="212" stroke="#DDE6F6" stroke-width="6"/>
+          </svg>
+          EOF
+          cp AppDir/crystalify.svg AppDir/.DirIcon
+
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool-x86_64.AppImage AppDir dist/crystalify-linux-x86_64.AppImage
+          chmod +x dist/crystalify-linux-x86_64.AppImage
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: crystalify-linux
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - build-linux
+      - build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd dist
+          chmod +x crystalify-linux-x86_64.AppImage || true
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Determine release metadata
+        id: meta
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            NAME="Crystalify ${TAG}"
+            if echo "${TAG}" | grep -qiE '(a|alpha|b|beta|rc)'; then
+              PRERELEASE="true"
+            else
+              PRERELEASE="false"
+            fi
+          else
+            TAG="latest"
+            NAME="Crystalify Latest (main)"
+            PRERELEASE="true"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

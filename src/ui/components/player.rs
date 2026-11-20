@@ -1,6 +1,7 @@
 use crate::app::{AppState, COVER_HEIGHT_CELLS, COVER_WIDTH_CELLS, PlaybackStatus};
-use crate::ui::theme::{BADGE_FG, ERROR, MUTED, PRIMARY, TEXT};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use crate::spotify::models::TrackLyrics;
+use crate::ui::theme::{BADGE_FG, ERROR, MUTED, PRIMARY, TEXT, build_gradient_lyric_line};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Wrap};
@@ -122,15 +123,23 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
     if let PlaybackStatus::Failed(ref err) = state.playback_status
         && padded_area.height > header_height
     {
-        let remaining = padded_area.height - header_height;
-        let error_offset = if remaining >= 2 { 1 } else { 0 };
-        let error_area = Rect {
-            x: padded_area.x,
-            y: padded_area.y.saturating_add(header_height + error_offset),
-            width: padded_area.width,
-            height: remaining.saturating_sub(error_offset),
+        let reserved_for_lyrics = if padded_area.height >= header_height + 4 {
+            3
+        } else {
+            0
         };
-        if error_area.height > 0 {
+        let available_below_header = padded_area
+            .height
+            .saturating_sub(header_height + reserved_for_lyrics);
+        let error_offset = if available_below_header >= 2 { 1 } else { 0 };
+        let error_height = available_below_header.saturating_sub(error_offset);
+        if error_height > 0 {
+            let error_area = Rect {
+                x: padded_area.x,
+                y: padded_area.y.saturating_add(header_height + error_offset),
+                width: padded_area.width,
+                height: error_height,
+            };
             let error_line = Line::from(vec![
                 Span::styled(
                     "Error:  ",
@@ -141,6 +150,65 @@ pub fn render_now_playing(frame: &mut Frame, state: &AppState, area: Rect) {
             frame.render_widget(Paragraph::new(error_line).wrap(Wrap { trim: true }), error_area);
         }
     }
+
+    if padded_area.height >= header_height + 3 && padded_area.width >= 6 {
+        let lyrics_area = Rect {
+            x: padded_area.x,
+            y: padded_area.y + padded_area.height - 3,
+            width: padded_area.width,
+            height: 3,
+        };
+        render_lyrics_panel(frame, state, lyrics_area);
+    }
+}
+
+fn render_lyrics_panel(frame: &mut Frame, state: &AppState, area: Rect) {
+    let lyrics_title = match &state.lyrics {
+        TrackLyrics::Synced(_) => " Lyrics [Synced] ".to_string(),
+        TrackLyrics::Unsynced(lines) if !lines.is_empty() => {
+            let idx = state.lyrics_manual_index.min(lines.len() - 1);
+            format!(" Lyrics [{}/{} | w/s] ", idx + 1, lines.len())
+        }
+        _ => " Lyrics ".to_string(),
+    };
+
+    let lyrics_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(MUTED))
+        .title(lyrics_title)
+        .title_style(Style::default().fg(PRIMARY));
+
+    let lyrics_inner = lyrics_block.inner(area);
+    frame.render_widget(lyrics_block, area);
+
+    if lyrics_inner.width == 0 || lyrics_inner.height == 0 {
+        return;
+    }
+
+    let (lyric_text, is_lyric_text) = state.current_lyric_display();
+    let line = if is_lyric_text {
+        build_gradient_lyric_line(
+            &lyric_text,
+            state.lyrics_gradient_phase,
+            lyrics_inner.width as usize,
+        )
+    } else {
+        let max_w = lyrics_inner.width as usize;
+        let truncated: String = lyric_text.chars().take(max_w).collect();
+        Line::from(Span::styled(truncated, Style::default().fg(MUTED)))
+    };
+
+    let single_line_area = Rect {
+        x: lyrics_inner.x,
+        y: lyrics_inner.y,
+        width: lyrics_inner.width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(line).alignment(Alignment::Center),
+        single_line_area,
+    );
 }
 
 pub fn render_progress(frame: &mut Frame, state: &AppState, area: Rect) {

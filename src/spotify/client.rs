@@ -1,5 +1,6 @@
 use crate::spotify::models::{
-    AlbumItem, ArtistItem, CollectionKind, PlaylistItem, SearchResults, TrackMetadata,
+    AlbumItem, ArtistItem, CollectionKind, PlaylistItem, SearchResults, SyncedLyricLine,
+    TrackLyrics, TrackMetadata,
 };
 use futures_util::stream::{self, StreamExt};
 use librespot::core::session::Session;
@@ -12,6 +13,12 @@ use std::env;
 
 const SPOTIFY_API_BASE: &str = "https://api.spotify.com/v1";
 const PATHFINDER_URL: &str = "https://api-partner.spotify.com/pathfinder/v1/query";
+const LRCLIB_API_BASE: &str = "https://lrclib.net/api";
+const LRCLIB_USER_AGENT: &str = concat!(
+    "crystalify/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/entropymustdie/crystalify)"
+);
 const SEARCH_DESKTOP_HASH: &str =
     "fcad5a3e0d5af727fb76966f06971c19cfa2275e6ff7671196753e008611873c";
 
@@ -874,6 +881,241 @@ impl SpotifyClient {
 
         Ok(results.into_iter().flatten().collect())
     }
+
+    pub async fn fetch_lyrics(
+        &self,
+        title: &str,
+        artist: &str,
+        album: &str,
+        duration_ms: u32,
+    ) -> TrackLyrics {
+        let trimmed_title = title.trim();
+        if trimmed_title.is_empty() || trimmed_title == "No Track Playing" {
+            return TrackLyrics::Unavailable;
+        }
+        let primary_artist = artist.split(',').next().unwrap_or(artist).trim();
+        let duration_sec = duration_ms.saturating_add(500) / 1000;
+
+        let mut get_url = format!(
+            "{LRCLIB_API_BASE}/get?track_name={}&artist_name={}&album_name={}",
+            urlencode_query(trimmed_title),
+            urlencode_query(primary_artist),
+            urlencode_query(album.trim())
+        );
+        if duration_sec > 0 {
+            get_url.push_str(&format!("&duration={duration_sec}"));
+        }
+
+        if let Ok(resp) = self
+            .http
+            .get(&get_url)
+            .header("User-Agent", LRCLIB_USER_AGENT)
+            .send()
+            .await
+            && resp.status().is_success()
+            && let Ok(val) = resp.json::<Value>().await
+            && let Some(lyrics) = parse_lrclib_entry(&val)
+        {
+            return lyrics;
+        }
+
+        let cleaned_title = clean_track_title(trimmed_title);
+        let search_query = if primary_artist.is_empty() {
+            cleaned_title
+        } else {
+            format!("{primary_artist} {cleaned_title}")
+        };
+        let search_url = format!(
+            "{LRCLIB_API_BASE}/search?q={}",
+            urlencode_query(search_query.trim())
+        );
+
+        if let Ok(resp) = self
+            .http
+            .get(&search_url)
+            .header("User-Agent", LRCLIB_USER_AGENT)
+            .send()
+            .await
+            && resp.status().is_success()
+            && let Ok(Value::Array(items)) = resp.json::<Value>().await
+            && let Some(best) = select_best_lrclib_match(&items, duration_sec)
+        {
+            return best;
+        }
+
+        TrackLyrics::Unavailable
+    }
+}
+
+fn parse_lrc_timestamp(tag: &str) -> Option<u32> {
+    let (min_str, rest) = tag.trim().split_once(':')?;
+    let minutes: u32 = min_str.parse().ok()?;
+    let (sec_str, frac_opt) = if let Some((s, f)) = rest.split_once('.') {
+        (s, Some(f))
+    } else if let Some((s, f)) = rest.split_once(':') {
+        (s, Some(f))
+    } else {
+        (rest, None)
+    };
+    let seconds: u32 = sec_str.parse().ok()?;
+    let frac_ms: u32 = match frac_opt {
+        Some(f) if f.len() == 1 => f.parse::<u32>().ok()? * 100,
+        Some(f) if f.len() == 2 => f.parse::<u32>().ok()? * 10,
+        Some(f) if f.len() >= 3 => f[..3].parse::<u32>().ok()?,
+        Some(_) => 0,
+        None => 0,
+    };
+    Some(
+        minutes
+            .saturating_mul(60_000)
+            .saturating_add(seconds.saturating_mul(1_000))
+            .saturating_add(frac_ms),
+    )
+}
+
+pub fn parse_lrc(lrc: &str) -> Vec<SyncedLyricLine> {
+    let mut lines = Vec::new();
+    for raw_line in lrc.lines() {
+        let mut rest = raw_line.trim();
+        let mut timestamps = Vec::new();
+        while rest.starts_with('[') {
+            let Some(end_idx) = rest.find(']') else {
+                break;
+            };
+            let tag = &rest[1..end_idx];
+            if let Some(ms) = parse_lrc_timestamp(tag) {
+                timestamps.push(ms);
+                rest = &rest[end_idx + 1..];
+            } else {
+                break;
+            }
+        }
+        if timestamps.is_empty() {
+            continue;
+        }
+        let trimmed_text = rest.trim();
+        let text = if trimmed_text.is_empty() {
+            "♪".to_string()
+        } else {
+            trimmed_text.to_string()
+        };
+        for time_ms in timestamps {
+            lines.push(SyncedLyricLine {
+                time_ms,
+                text: text.clone(),
+            });
+        }
+    }
+    lines.sort_by_key(|l| l.time_ms);
+    lines
+}
+
+pub fn parse_lrclib_entry(json: &Value) -> Option<TrackLyrics> {
+    if let Some(synced) = json.get("syncedLyrics").and_then(Value::as_str)
+        && !synced.trim().is_empty()
+    {
+        let parsed = parse_lrc(synced);
+        if !parsed.is_empty() {
+            return Some(TrackLyrics::Synced(parsed));
+        }
+    }
+    if let Some(plain) = json.get("plainLyrics").and_then(Value::as_str)
+        && !plain.trim().is_empty()
+    {
+        let lines: Vec<String> = plain
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        if !lines.is_empty() {
+            return Some(TrackLyrics::Unsynced(lines));
+        }
+    }
+    if json.get("instrumental").and_then(Value::as_bool) == Some(true) {
+        return Some(TrackLyrics::Instrumental);
+    }
+    None
+}
+
+fn is_edition_suffix(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    const KEYWORDS: &[&str] = &[
+        "remaster",
+        "deluxe",
+        "edition",
+        "version",
+        "anniversary",
+        "live",
+        "mono",
+        "stereo",
+        "bonus",
+        "explicit",
+        "clean",
+        "feat.",
+        "ft.",
+        "radio edit",
+        "single",
+    ];
+    KEYWORDS.iter().any(|k| lower.contains(k))
+}
+
+pub fn clean_track_title(title: &str) -> String {
+    let mut current = title.trim();
+
+    if let Some((before, after)) = current.split_once(" - ")
+        && is_edition_suffix(after)
+        && !before.trim().is_empty()
+    {
+        current = before.trim();
+    }
+
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        if current.ends_with(close)
+            && let Some(idx) = current.rfind(open)
+        {
+            let inside = &current[idx + 1..current.len() - 1];
+            let before = current[..idx].trim();
+            if is_edition_suffix(inside) && !before.is_empty() {
+                current = before;
+            }
+        }
+    }
+
+    current.to_string()
+}
+
+fn select_best_lrclib_match(items: &[Value], target_duration_sec: u32) -> Option<TrackLyrics> {
+    let mut best: Option<(u8, u64, TrackLyrics)> = None;
+
+    for item in items {
+        let Some(lyrics) = parse_lrclib_entry(item) else {
+            continue;
+        };
+        let tier: u8 = match lyrics {
+            TrackLyrics::Synced(_) => 3,
+            TrackLyrics::Unsynced(_) => 2,
+            TrackLyrics::Instrumental => 1,
+            _ => 0,
+        };
+        let dur_diff = item
+            .get("duration")
+            .and_then(Value::as_f64)
+            .map(|d| (d.round() as i64 - target_duration_sec as i64).unsigned_abs())
+            .unwrap_or(if target_duration_sec == 0 { 0 } else { u64::MAX });
+
+        let replace = match &best {
+            None => true,
+            Some((best_tier, best_diff, _)) => {
+                tier > *best_tier || (tier == *best_tier && dur_diff < *best_diff)
+            }
+        };
+        if replace {
+            best = Some((tier, dur_diff, lyrics));
+        }
+    }
+
+    best.map(|(_, _, lyrics)| lyrics)
 }
 
 #[cfg(test)]
@@ -1377,6 +1619,102 @@ mod tests {
                 r.playlists.len()
             );
             assert!(!r.tracks.is_empty(), "Tracks for '{q}' should not be empty");
+        }
+    }
+
+    #[test]
+    fn test_parse_lrc_timestamps_multi_metadata_sorting_and_empty_text() {
+        let lrc = "\
+[ti:Schism]
+[ar:TOOL]
+[al:Lateralus]
+[by:tester]
+[length:06:47]
+[01:20.500][00:12.05] I know the pieces fit
+[00:05]
+[00:08.50] 'Cause I watched them fall away
+";
+        let lines = parse_lrc(lrc);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].time_ms, 5_000);
+        assert_eq!(lines[0].text, "♪");
+        assert_eq!(lines[1].time_ms, 8_500);
+        assert_eq!(lines[1].text, "'Cause I watched them fall away");
+        assert_eq!(lines[2].time_ms, 12_050);
+        assert_eq!(lines[2].text, "I know the pieces fit");
+        assert_eq!(lines[3].time_ms, 80_500);
+        assert_eq!(lines[3].text, "I know the pieces fit");
+    }
+
+    #[test]
+    fn test_parse_lrclib_entry_and_clean_track_title() {
+        let synced = json!({
+            "syncedLyrics": "[00:01.00] First line\n[00:05.00] Second line",
+            "plainLyrics": "First line\nSecond line",
+            "instrumental": false
+        });
+        assert!(matches!(parse_lrclib_entry(&synced), Some(TrackLyrics::Synced(v)) if v.len() == 2));
+
+        let unsynced = json!({
+            "syncedLyrics": "",
+            "plainLyrics": "  Line A \n\n Line B  ",
+            "instrumental": false
+        });
+        assert_eq!(
+            parse_lrclib_entry(&unsynced),
+            Some(TrackLyrics::Unsynced(vec![
+                "Line A".to_string(),
+                "Line B".to_string()
+            ]))
+        );
+
+        let instrumental = json!({
+            "syncedLyrics": null,
+            "plainLyrics": null,
+            "instrumental": true
+        });
+        assert_eq!(
+            parse_lrclib_entry(&instrumental),
+            Some(TrackLyrics::Instrumental)
+        );
+
+        let empty = json!({
+            "syncedLyrics": "",
+            "plainLyrics": "   ",
+            "instrumental": false
+        });
+        assert_eq!(parse_lrclib_entry(&empty), None);
+
+        assert_eq!(clean_track_title("Time - 2011 Remastered Version"), "Time");
+        assert_eq!(clean_track_title("Money (Remastered 2023)"), "Money");
+        assert_eq!(clean_track_title("Schism (Deluxe Edition)"), "Schism");
+        assert_eq!(clean_track_title("Schism"), "Schism");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_integration_lrclib_fetch_lyrics_test() {
+        use crate::spotify::auth::init_cache;
+        use librespot::core::config::SessionConfig;
+
+        crate::spotify::init_tls_provider();
+        let cache = init_cache().expect("cache");
+        let session = Session::new(SessionConfig::default(), Some(cache));
+        let client = SpotifyClient::new(session);
+
+        let lyrics = client
+            .fetch_lyrics("Schism", "TOOL", "Lateralus", 407_000)
+            .await;
+        match &lyrics {
+            TrackLyrics::Synced(lines) => {
+                println!("LRCLIB Synced lyrics fetched: {} lines (first: '{}')", lines.len(), lines[0].text);
+                assert!(!lines.is_empty());
+            }
+            TrackLyrics::Unsynced(lines) => {
+                println!("LRCLIB Unsynced lyrics fetched: {} lines (first: '{}')", lines.len(), lines[0]);
+                assert!(!lines.is_empty());
+            }
+            other => panic!("Expected Synced or Unsynced lyrics from LRCLIB for TOOL - Schism, got {other:?}"),
         }
     }
 }

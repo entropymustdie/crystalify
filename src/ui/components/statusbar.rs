@@ -91,6 +91,13 @@ pub fn render_footer(frame: &mut Frame, area: Rect) {
         ),
         Span::styled("Pause  ", Style::default().fg(TEXT)),
         Span::styled(
+            "[w/s] ",
+            Style::default()
+                .fg(PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Lyrics  ", Style::default().fg(TEXT)),
+        Span::styled(
             "[q] ",
             Style::default()
                 .fg(PRIMARY)
