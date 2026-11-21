@@ -17,6 +17,10 @@ A modern, high-performance headless Spotify CLI and TUI client written in Rust f
 
 ---
 
+<img width="1921" height="1081" alt="зображення" src="https://github.com/user-attachments/assets/1a15011d-8142-4aed-bf23-7d98a80c8897" />
+
+---
+
 ## Controls / Keybindings
 
 | Key | Action |
