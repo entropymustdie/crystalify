@@ -19,6 +19,7 @@ const SPOTIFY_REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
 const SPOTIFY_SCOPES: &[&str] = &[
     "streaming",
     "user-read-private",
+    "user-library-read",
     "playlist-read-private",
     "playlist-read-collaborative",
 ];
@@ -108,15 +109,25 @@ pub fn get_cache_dir() -> Option<PathBuf> {
     )
 }
 
+pub const AUDIO_CACHE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
+
 pub fn init_cache_at(dir: &Path) -> Result<Cache, Box<dyn std::error::Error>> {
+    let audio_dir = dir.join("audio");
     fs::create_dir_all(dir)?;
+    fs::create_dir_all(&audio_dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::Permissions::from_mode(0o700);
-        fs::set_permissions(dir, perms)?;
+        fs::set_permissions(dir, perms.clone())?;
+        fs::set_permissions(&audio_dir, perms)?;
     }
-    let cache = Cache::new(Some(dir), Some(dir), None, None)?;
+    let cache = Cache::new(
+        Some(dir),
+        Some(dir),
+        Some(audio_dir.as_path()),
+        Some(AUDIO_CACHE_LIMIT_BYTES),
+    )?;
     Ok(cache)
 }
 
@@ -314,27 +325,85 @@ fn prompt_auth_method() -> Result<AuthMethod, Box<dyn std::error::Error>> {
 }
 
 pub async fn wait_for_session_country(session: &Session) {
-    for _ in 0..40 {
+    for _ in 0..75 {
         if !session.country().is_empty() {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
+pub fn create_session(cache: Option<Cache>) -> Session {
+    crate::spotify::init_tls_provider();
+    let session_config = SessionConfig::default();
+    let _ = fs::create_dir_all(&session_config.tmp_dir);
+    Session::new(session_config, cache)
+}
+
+pub struct AuthPlan {
+    pub cache: Option<Cache>,
+    pub cached_credentials: Option<Credentials>,
+    pub env_credentials: Option<Credentials>,
+}
+
+pub fn load_initial_auth_plan() -> AuthPlan {
+    crate::spotify::init_tls_provider();
+    let cache = init_cache();
+
+    let mut env_token = env::var("SPOTIFY_ACCESS_TOKEN").unwrap_or_default();
+    let env_username = env::var("SPOTIFY_USERNAME").unwrap_or_default();
+    let mut env_password = env::var("SPOTIFY_PASSWORD").unwrap_or_default();
+
+    let has_env_token = !env_token.trim().is_empty();
+    let has_env_user_pass = !env_username.trim().is_empty() && !env_password.trim().is_empty();
+
+    let env_credentials = if has_env_token {
+        Some(Credentials::with_access_token(env_token.trim()))
+    } else if has_env_user_pass {
+        Some(Credentials::with_password(
+            env_username.trim(),
+            env_password.trim(),
+        ))
+    } else {
+        None
+    };
+
+    zeroize_string(&mut env_token);
+    zeroize_string(&mut env_password);
+
+    let cached_credentials = if env_credentials.is_none() {
+        cache.as_ref().and_then(Cache::credentials)
+    } else {
+        None
+    };
+
+    AuthPlan {
+        cache,
+        cached_credentials,
+        env_credentials,
+    }
+}
+
+pub async fn prompt_interactive_credentials() -> Result<Credentials, Box<dyn std::error::Error>> {
+    match prompt_auth_method()? {
+        AuthMethod::OAuth => obtain_oauth_credentials().await,
+        AuthMethod::Discovery => obtain_discovery_credentials().await,
+        AuthMethod::Password => obtain_password_credentials(),
+    }
+}
+
+#[allow(dead_code)]
 async fn connect_session(
     credentials: Credentials,
     cache: Option<Cache>,
 ) -> Result<Session, Box<dyn std::error::Error>> {
-    crate::spotify::init_tls_provider();
-    let session_config = SessionConfig::default();
-    let _ = fs::create_dir_all(&session_config.tmp_dir);
-    let session = Session::new(session_config, cache);
+    let session = create_session(cache);
     session.connect(credentials, true).await?;
     wait_for_session_country(&session).await;
     Ok(session)
 }
 
+#[allow(dead_code)]
 pub async fn authenticate() -> Result<Session, Box<dyn std::error::Error>> {
     crate::spotify::init_tls_provider();
     let cache = init_cache();
@@ -624,13 +693,18 @@ mod tests {
         let temp_dir = env::temp_dir().join(format!("crystalify_test_cache_{nanos}"));
 
         let cache = init_cache_at(&temp_dir).expect("Failed to initialize cache");
+        let audio_dir = temp_dir.join("audio");
         assert!(temp_dir.exists());
+        assert!(audio_dir.exists());
+        assert_eq!(AUDIO_CACHE_LIMIT_BYTES, 512 * 1024 * 1024);
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(&temp_dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700);
+            let audio_mode = fs::metadata(&audio_dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(audio_mode, 0o700);
         }
 
         let creds = Credentials::with_access_token("test_oauth_token_blob");

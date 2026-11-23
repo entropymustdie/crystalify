@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "crystalify"
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 dependencies = [
  "cpal",
  "crossterm",
@@ -711,9 +711,11 @@ dependencies = [
  "image",
  "librespot",
  "log",
+ "protobuf",
  "ratatui",
  "ratatui-image",
  "reqwest 0.13.5",
+ "rodio",
  "rustfft",
  "rustls 0.23.45",
  "serde",

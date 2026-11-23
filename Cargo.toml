@@ -1,6 +1,6 @@
 [package]
 name = "crystalify"
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -12,9 +12,11 @@ glam = "0.33.11"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 librespot = { git = "https://github.com/librespot-org/librespot", default-features = false, features = ["rustls-tls-webpki-roots", "rodio-backend", "with-libmdns"] }
 log = "0.4"
+protobuf = "3"
 ratatui = "0.30.2"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm", "image-defaults"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "charset", "http2", "system-proxy", "json"] }
+rodio = { version = "0.21", default-features = false, features = ["playback"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustfft = "6.4.1"
 serde = { version = "1.0.229", features = ["derive"] }

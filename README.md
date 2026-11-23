@@ -6,14 +6,14 @@ A modern, high-performance headless Spotify CLI and TUI client written in Rust f
 
 ## Features
 
-- **Headless Spotify Playback**: Built on `librespot` (`rustls` + `rodio`/`cpal`), with honest playback state indicators (`[LOADING]`, `[PLAYING]`, `[PAUSED]`, `[ERROR]`) and automatic audio output detection without crashes when no device is present.
+- **Headless Low-Latency Spotify Playback**: Built on `librespot` (`rustls` + custom low-latency `rodio`/`cpal` sink with instant buffer flush on track switch, 300ms stream read-ahead, speculative debounced cursor & next-track preloading, 512 MB LRU on-disk audio file cache, and zero-roundtrip windowed `Spirc` queue loading), with honest playback state indicators (`[LOADING]`, `[PLAYING]`, `[PAUSED]`, `[ERROR]`) and automatic audio output detection.
 - **Flexible Authentication**: Supports Browser / Google OAuth 2.0 (PKCE) out of the box, Spotify Connect Discovery, and masked username/password login with memory zeroization, plus local credential caching on Linux, macOS, and Windows.
-- **Search & Queue Playback**: Search across Tracks, Albums, Artists, and Playlists; play a single track or an entire album/artist/playlist collection with queue navigation and automatic next-track playback.
+- **Search, User Library & Queue Playback**: Search across Tracks, Albums, Artists, and Playlists, or browse your personal **User Library** (`[l]` — Your Playlists, Liked Songs, and Saved Albums); supports full playlist/library pagination (no 50-track limit) with high-speed batched Extended Metadata resolution, progressive streaming into the TUI, in-memory metadata caching, and virtualized O(viewport) list rendering.
+- **Full Spotify Connect Remote Control (`Spirc`)**: Registers `crystalify` as an active Spotify Connect device so playback is synced with your account's Listening History / Recently Played and can be controlled both from the TUI and remotely from Spotify on your phone, desktop, or web browser (with live Now Playing, cover art, and lyrics updates).
 - **Inline Terminal Album Artwork**: Cover art rendered in the `Now Playing` panel via `ratatui-image` (Kitty graphics protocol, Sixel, and Unicode halfblock fallback).
 - **Synchronized Lyrics**: Real-time LRC timestamped lyrics and unsynced lyrics via LRCLIB (`lrclib.net`), rendered in a single-line `Lyrics` bar with an animated flowing purple → blue → cyan gradient and manual scrolling (`w` / `s` or `[` / `]`).
 - **Custom TUI Theme**: Clean pastel dark palette with responsive layout across terminal sizes.
 - **Real-Time 3D Audio Visualizer (In Progress)**: Audio stream FFT analysis projected into dynamic 3D terminal meshes.
-- **Full Spotify Connect Remote Control / Spirc (In Progress)**: Controlling playback remotely from other Spotify clients.
 
 ---
 
@@ -26,8 +26,12 @@ A modern, high-performance headless Spotify CLI and TUI client written in Rust f
 | Key | Action |
 |---|---|
 | `/` | Enter search mode (`Enter` to search, `Esc` or `Ctrl+C` to cancel) |
-| `Tab` / `Shift+Tab` or `1`–`4` | Switch search category (`Tracks`, `Albums`, `Artists`, `Playlists`) |
+| `l` | Toggle between **Search** view and **My Library** view (`Playlists`, `Liked Songs`, `Saved Albums`) |
+| `r` | Refresh **My Library** (when in Library view) |
+| `Tab` / `Shift+Tab` or `1`–`4` | Switch category tab (`1`–`4` in Search; `1`–`3` in Library) |
 | `Up` / `Down` or `k` / `j` | Move selection up / down |
+| `PageUp` / `PageDown` or `Ctrl+u` / `Ctrl+d` | Jump selection up / down by 15 items |
+| `Home` / `End` or `g` / `G` | Jump to first / last item in list |
 | `Enter` | Play selected track or open selected album / artist / playlist |
 | `p` | Play all tracks from the selected/opened collection |
 | `n` / `b` | Next / previous track in queue |

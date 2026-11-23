@@ -248,15 +248,32 @@ pub fn render_progress(frame: &mut Frame, state: &AppState, area: Rect) {
 
 pub fn render_details(frame: &mut Frame, state: &AppState, area: Rect) {
     let vol_percent = ((state.volume as f64 / u16::MAX as f64) * 100.0).round() as u8;
-    let queue_info = if state.queue.is_empty() {
-        "Empty".to_string()
-    } else {
+    let queue_info = if state.connect_active
+        && let Some((pos, total)) = state.connect_queue_position
+    {
+        format!("{pos} / {total} tracks")
+    } else if !state.queue.is_empty() {
         format!("{} / {} tracks", state.queue_index + 1, state.queue.len())
+    } else if let Some((pos, total)) = state.connect_queue_position {
+        format!("{pos} / {total} tracks")
+    } else {
+        "Empty".to_string()
     };
     let pipeline_color = if state.audio_error.is_some() {
         ERROR
     } else {
         TEXT
+    };
+    let (connect_label, connect_color) = if state.connect_active {
+        let label = match state.connect_client.as_deref() {
+            Some(client) if !client.is_empty() => format!("Active (via {client})"),
+            _ => "Active".to_string(),
+        };
+        (label, PRIMARY)
+    } else if state.connect_ready {
+        ("Standby (ready for remote)".to_string(), TEXT)
+    } else {
+        ("Disabled".to_string(), MUTED)
     };
     let text = vec![
         Line::from(vec![
@@ -282,6 +299,10 @@ pub fn render_details(frame: &mut Frame, state: &AppState, area: Rect) {
                     .fg(PRIMARY)
                     .add_modifier(Modifier::BOLD),
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("Connect:        ", Style::default().fg(MUTED)),
+            Span::styled(connect_label, Style::default().fg(connect_color)),
         ]),
     ];
 

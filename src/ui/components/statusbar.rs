@@ -49,6 +49,13 @@ pub fn render_footer(frame: &mut Frame, area: Rect) {
         ),
         Span::styled("Search  ", Style::default().fg(TEXT)),
         Span::styled(
+            "[l] ",
+            Style::default()
+                .fg(PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Library  ", Style::default().fg(TEXT)),
+        Span::styled(
             "[Tab/1-4] ",
             Style::default()
                 .fg(PRIMARY)
